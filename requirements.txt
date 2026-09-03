@@ -1,0 +1,13 @@
+streamlit
+pandas
+openpyxl
+xlsxwriter
+python-dotenv
+requests
+pdfplumber
+Pillow
+pytesseract
+pdf2image
+opencv-python-headless
+numpy
+pytest

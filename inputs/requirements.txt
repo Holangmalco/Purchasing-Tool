@@ -1,0 +1,12 @@
+pandas
+openpyxl
+xlsxwriter
+python-dotenv
+google-genai
+docxtpl
+requests
+selenium
+pdfplumber
+Pillow
+pytesseract
+pdf2image
