@@ -1,0 +1,16 @@
+@echo off
+chcp 65001 > nul
+
+REM 1. 알려주신 절대 경로로 강제 이동
+cd /d "C:\Purchasing Tool"
+
+REM 2. 가상환경이 해당 폴더에 있다면 활성화
+if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
+) else if exist ".venv\Scripts\activate.bat" (
+    call .venv\Scripts\activate.bat
+)
+
+echo 구매 문서 검증기를 실행합니다. 브라우저가 열릴 때까지 기다려주세요...
+python -m streamlit run app.py
+pause

@@ -60,6 +60,10 @@ def find_with_context(text, pattern):
 
 # 💡 [신규] 금액 2단계 추출 및 수학적 검증(추론) 로직
 def extract_financial_amounts(extracted_text):
+    doc_keywords = ['견적', '청구', '명세', '계산서', 'Invoice', '납품']
+    if not any(kw in extracted_text for kw in doc_keywords):
+        return {"합계": None, "공급가액": None, "부가세": None}
+
     raw_amounts = re.findall(r'\b\d{1,3}(?:,\d{3})+\b', extracted_text)
     amounts = sorted(list(set([int(a.replace(',', '')) for a in raw_amounts])), reverse=True)
     
@@ -67,9 +71,9 @@ def extract_financial_amounts(extracted_text):
     if not amounts:
         return result
 
-    total_pattern = r'(?:합계|총계|총액|공급대가|결제금액|Total)[^\d\n]*(\d{1,3}(?:,\d{3})+)'
-    vat_pattern = r'(?:부가세|부가가치세|세액|V\.?A\.?T)[^\d\n]*(\d{1,3}(?:,\d{3})+)'
-    supply_pattern = r'(?:공급가|공급가액|단가|Subtotal)[^\d\n]*(\d{1,3}(?:,\d{3})+)'
+    total_pattern = r'(?:합계|총계|총액|공급대가|결제금액|Total)[^\d]*(\d{1,3}(?:,\d{3})+)'
+    vat_pattern = r'(?:부가세|부가가치세|세액|V\.?A\.?T)[^\d]*(\d{1,3}(?:,\d{3})+)'
+    supply_pattern = r'(?:공급가|공급가액|단가|Subtotal|소계)[^\d]*(\d{1,3}(?:,\d{3})+)'
     
     total_match = re.search(total_pattern, extracted_text, re.IGNORECASE)
     vat_match = re.search(vat_pattern, extracted_text, re.IGNORECASE)
@@ -239,6 +243,9 @@ if uploaded_files:
                         biz_pattern = r'\d{3}-\d{2}-\d{5}'
                         biz_results = find_with_context(extracted_text, biz_pattern)
                         
+                        my_biz_no = "216-82-" # 실제 산단 번호 앞자리로 변경 필요
+                        filtered_biz = [b for b in biz_results if my_biz_no not in b]
+                        
                         date_pattern = r'\d{4}[-./년]\s?\d{1,2}[-./월]\s?\d{1,2}[일]?'
                         date_results = find_with_context(extracted_text, date_pattern)
                         
@@ -247,8 +254,8 @@ if uploaded_files:
                         col_a, col_b, col_c = st.columns(3)
                         with col_a:
                             st.markdown("**🏢 사업자번호 탐지**")
-                            if biz_results:
-                                for r in biz_results: st.info(r)
+                            if filtered_biz:
+                                for r in filtered_biz: st.info(r)
                             else: st.write("감지 안 됨")
                                 
                         with col_b:
