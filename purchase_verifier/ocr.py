@@ -195,7 +195,8 @@ def ocr_image(img_input: Union[Image.Image, np.ndarray, str, Path]) -> str:
         import pytesseract
         pil_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
         return pytesseract.image_to_string(pil_img, lang="kor+eng").strip()
-    except Exception:
+    except Exception as e:
+        print(f"[Pytesseract Fallback Notice] {e}")
         return ""
 
 
@@ -224,7 +225,8 @@ def extract_text_from_pdf_data(data: bytes) -> str:
                             parts.append(footer_ocr)
                         page_texts.append("\n".join(parts))
                         continue
-                    except Exception:
+                    except Exception as e:
+                        print(f"[Header/Footer OCR Warning] {e}")
                         pass
                 page_texts.append(text)
             else:
@@ -234,7 +236,8 @@ def extract_text_from_pdf_data(data: bytes) -> str:
                     pdf_doc = pdfium.PdfDocument(io.BytesIO(data))
                     p_img = pdf_doc[idx].render(scale=2.5).to_pil()
                     img_cv = cv2.cvtColor(np.array(p_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-                except Exception:
+                except Exception as e:
+                    print(f"[pypdfium2 Render Warning, falling back to pdfplumber] {e}")
                     img = page.to_image(resolution=200).original
                     img_cv = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
                 ocr_res = ocr_image(img_cv)
@@ -255,7 +258,8 @@ def extract_text_from_pdf_data(data: bytes) -> str:
                                 band_txt = rec_res[0][0]
                                 if "님" in band_txt or any(c in band_txt for c in ("주", "회사", "상호")):
                                     ocr_res = f"{band_txt}\n{ocr_res}"
-                except Exception:
+                except Exception as e:
+                    print(f"[Passbook Band Scan Warning] {e}")
                     pass
 
                 page_texts.append(ocr_res)

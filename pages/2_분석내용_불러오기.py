@@ -46,6 +46,8 @@ with tab1:
                         cache_db[req_no]["meta"]["연구책임자정보"] = row["연구책임자정보"]
                         cache_db[req_no]["meta"]["물품담당자"] = row["물품담당자"]
                         cache_db[req_no]["meta"]["업체명"] = row["업체명"]
+                        if "대표자명" in row:
+                            cache_db[req_no]["meta"]["대표자명"] = row["대표자명"]
                         cache_db[req_no]["meta"]["업체담당자정보"] = row["업체담당자정보"]
 
                 with open(CACHE_FILE, "w", encoding="utf-8") as f:
@@ -82,6 +84,7 @@ with tab1:
                     st.session_state["p_con_type"] = loaded_data.get("con_type", "비교견적")
                     st.session_state["manual_json_data"] = loaded_data.get("manual_ai", {})
                     st.session_state["req_analysis_done"] = True
+                    st.session_state["has_auto_cached_current_analysis"] = True
 
                     st.success(f"✅ 구매요구번호 [{req_val}] 건의 데이터가 복구되었습니다! 상단 '구매 문서 검증' 메뉴로 이동하시면 바로 확인하실 수 있습니다.")
                 else:

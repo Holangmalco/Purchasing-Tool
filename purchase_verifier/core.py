@@ -804,6 +804,108 @@ def _is_vendor_name_candidate(name: str) -> bool:
     return len(clean) >= 2
 
 
+# ==============================================================================
+# 📋 문서 항목별 정규식 및 라벨 추출 규칙 테이블 (Extraction Rules Registry)
+# ==============================================================================
+# 한 화면에서 문서 유형별 정규식과 키워드 라벨을 한눈에 파악하고 수정할 수 있는 중앙 규칙 테이블입니다.
+EXTRACTION_RULES = {
+    "사업자번호": {
+        "labels": ("사업자번호", "등록번호", "사업자등록번호", "사업자 등록번호", "사업자"),
+        "pattern": r"[0-9\s\-–—―─]{10,30}",
+    },
+    "상호명": {
+        "labels": (
+            "상호/대표", "상호 / 대표", "상호/대표자", "상호 / 대표자", "상호/성명", "상호 / 성명",
+            "상호(법인명 및 사업체명)", "상호(법인명)", "상호[법인명]", "상호및성명", "상호 및 성명",
+            "상호명", "상호", "상 호 명", "상 호", "법인명(단체명)", "법인명 (단체명)", "법인명[단체명]",
+            "법인명 [단체명]", "법인명", "단체명", "업체명", "회사명", "협력사명", "협력사",
+            "공급자", "발신", "발신처", "발행처", "발행자", "시공사", "시공자", "공사업체", "시공업체", "설치업체",
+        ),
+    },
+    "대표자": {
+        "labels": (
+            "代 表", "代表", "회사명/대표", "상호/대표", "대표자(대표유형)", "대표자 (대표유형)",
+            "대표자[대표유형]", "대표자 [대표유형]", "대표자", "대표자명", "대표자 성명", "대표이사", "대표", "성명",
+        ),
+    },
+    "수신자": {
+        "labels": (
+            "수신자", "수신처", "수신", "귀하", "납품처", "발주처", "고객명", "고객사",
+            "Messrs", "MESSRS", "Messrs.", "To", "TO", "to",
+        ),
+    },
+    "담당자": {
+        "labels": ("담당자", "담당자명", "예약 담당자", "예약담당자", "담당", "작성자", "발신인"),
+    },
+    "전화번호": {
+        "labels": ("대표전화", "전화", "연락처", "휴대폰", "TEL/FAX", "TEL / FAX", "TEL", "tel", "Tel", "HP", "hp", "H.P", "Phone", "Mobile"),
+        "pattern": r"[0-9() .+-]{8,}",
+    },
+    "이메일": {
+        "labels": ("이메일", "email", "MAIL", "mail", "Mail", "E-MAIL", "E-mail"),
+        "pattern": r"[\w.+-]+@[\w.-]+",
+    },
+    "통장사본": {
+        "holder_labels": ("예금주", "예금주명", "예금주(성명/상호)"),
+        "account_labels": ("계좌번호", "계좌", "계변호", "입금안내", "입금은행", "입금처"),
+        "account_pattern": r"[0-9\s*\-]{6,}",
+    },
+    "견적일자": {
+        "labels": ("견적일자", "견적일", "견적제출일", "제출일", "발행일자", "발행일", "작성일", "일자", "일 자"),
+    },
+    "견적총액": {
+        "revised_labels": (
+            "Revised Price", "Revised Amount", "RevisedPrice", "RevisedAmount",
+            "최종 견적", "최종견적", "최종금액", "결제금액", "네고금액", "조정금액", "D/C적용금액",
+        ),
+        "vat_inclusive_labels": (
+            "부가가치세(10%) 포함 총 공급 가액", "부가가치세(10%) 포함 총 공급가액",
+            "부가가치세(10%)포함 총 공급 가액", "부가가치세(10%)포함 총 공급가액",
+            "부가가치세 포함 총 공급 가액", "부가가치세 포함 총 공급가액",
+            "부가가치세포함 총 공급 가액", "부가가치세포함 총 공급가액", "부가가치세 포함 총공급가액",
+            "부가세 포함 총 공급가액", "부가세 포함 총공급가액", "부가세포함 총 공급가액", "부가세포함 총공급가액",
+            "VAT 포함 총 공급가액", "VAT 포함 총공급가액", "VAT포함 총 공급가액", "VAT포함 총공급가액",
+            "총계(VAT 포함)", "총계 (VAT 포함)", "총계(VAT포함)", "총계 (VAT포함)",
+            "총계(부가세 포함)", "총계 (부가세 포함)", "총계(부가세포함)", "총계 (부가세포함)",
+            "총계(부가가치세 포함)", "총계 (부가가치세 포함)", "총계(부가가치세포함)", "총계 (부가가치세포함)",
+            "합계금액(부가세포함)", "합계금액 (부가세포함)", "합계금액(VAT포함)", "합계금액 (VAT포함)",
+            "합계금액(부가가치세포함)", "합계금액 (부가가치세포함)",
+            "합계(부가세포함)", "합계 (부가세포함)", "합계(VAT포함)", "합계 (VAT포함)",
+            "합계(부가가치세포함)", "합계 (부가가치세포함)",
+            "합계금(부가세포함)", "합계금 (부가세포함)", "합계금(VAT포함)", "합계금 (VAT포함)",
+            "제안가(부가세포함)", "제안가 (부가세포함)", "제안가(VAT포함)", "제안가 (VAT포함)",
+            "제안가격(부가세포함)", "제안가격 (부가세포함)", "제안가격(VAT포함)", "제안가격 (VAT포함)",
+            "TOTAL (+VAT)", "TOTAL(+VAT)", "TOTAL (VAT)", "TOTAL(VAT)",
+            "TOTAL AMOUNT. (VAT 포함)", "TOTAL AMOUNT (VAT 포함)", "TOTAL AMOUNT(VAT 포함)", "TOTAL AMOUNT (VAT포함)",
+            "TOTAL AMOUNT.(VAT 포함)", "TOTAL AMOUNT.(VAT포함)",
+            "예정금액(부가가치세포함)", "예정금액 (부가가치세포함)",
+            "예정금액(부가세포함)", "예정금액 (부가세포함)",
+            "예정금액부가가치세포함", "예정금액부가세포함",
+            "공사예정금액부가가치세포함", "공사예정금액부가세포함",
+            "아래와 같이 견적합니다", "아래와같이 견적합니다", "아래와 같이 견적하나이다",
+            "견적금액(VAT포함)", "견적금액 (VAT포함)", "견적금액(부가세포함)", "견적금액 (부가세포함)",
+            "견적금액", "견적 금액", "견적총액", "견적 총액",
+        ),
+        "general_total_labels": (
+            "견적합계금액", "전체합계", "합계금액", "총합계금액", "총합계", "합계금",
+            "합계(Total)", "합계 (Total)", "합계(total)", "합계 (total)",
+            "제안공급가", "제안가격", "공급총액", "총 공급 가액", "총 공급가액", "총공급가액", "총공급대가",
+            "예정금액", "공사예정금액", "설치예정금액", "사업비", "소요예산",
+            "합계", "총계", "총액",
+            "공급대가", "공사금액", "금액", "Total Amount", "TOTAL AMOUNT", "Total", "TOTAL",
+        ),
+        "vat_labels": ("부가세", "부가가치세", "세액", "VAT"),
+        "subtotal_labels": (
+            "공급가액", "공급가", "Subtotal", "소계",
+            "합계금액(부가세별도)", "합계금액 (부가세별도)", "합계(부가세별도)", "합계 (부가세별도)",
+            "합계금액(VAT별도)", "합계금액 (VAT별도)", "합계(VAT별도)", "합계 (VAT별도)",
+            "제안가(부가세별도)", "제안가 (부가세별도)", "제안가(VAT별도)", "제안가 (VAT별도)",
+            "제안가격(부가세별도)", "제안가격 (부가세별도)",
+        ),
+    },
+}
+
+
 def extract_document(
     text: str,
     filename: str = "",
@@ -817,7 +919,7 @@ def extract_document(
     own_prefix = re.sub(r"\D", "", my_business_prefix())
 
     # 1. 라벨(등록번호, 사업자번호 등) 기반 번호 탐색
-    labeled_biz = _labeled(text, ("사업자번호", "등록번호", "사업자등록번호", "사업자 등록번호", "사업자"), r"[0-9\s\-–—―─]{10,30}")
+    labeled_biz = _labeled(text, EXTRACTION_RULES["사업자번호"]["labels"], EXTRACTION_RULES["사업자번호"]["pattern"])
     selected_biz = ""
     biz_evidence_str = ""
     is_valid_biz = False
@@ -854,7 +956,7 @@ def extract_document(
     if kind != DocumentType.BANK_COPY:
         raw_vendor = _labeled(
             text,
-            ("상호/대표", "상호 / 대표", "상호/대표자", "상호 / 대표자", "상호/성명", "상호 / 성명", "상호(법인명 및 사업체명)", "상호(법인명)", "상호[법인명]", "상호및성명", "상호 및 성명", "상호명", "상호", "상 호 명", "상 호", "법인명(단체명)", "법인명 (단체명)", "법인명[단체명]", "법인명 [단체명]", "법인명", "단체명", "업체명", "회사명", "협력사명", "협력사", "공급자", "발신", "발신처", "발행처", "발행자", "시공사", "시공자", "공사업체", "시공업체", "설치업체"),
+            EXTRACTION_RULES["상호명"]["labels"],
         )
         if raw_vendor.raw:
             cleaned_vendor, extracted_rep_from_vendor = _clean_vendor_name(raw_vendor.raw)
@@ -959,7 +1061,7 @@ def extract_document(
 
     document.representative = _labeled(
         text,
-        ("代 表", "代表", "회사명/대표", "상호/대표", "대표자(대표유형)", "대표자 (대표유형)", "대표자[대표유형]", "대표자 [대표유형]", "대표자", "대표자명", "대표자 성명", "대표이사", "대표", "성명"),
+        EXTRACTION_RULES["대표자"]["labels"],
         validator=_is_representative_candidate,
     )
     if not document.representative.raw:
@@ -999,7 +1101,7 @@ def extract_document(
     if not document.representative.raw and extracted_rep_from_vendor:
         document.representative = _evidence(extracted_rep_from_vendor, f"상호 뒤 성명 분리: {raw_vendor.raw}", 0.78, inferred=True)
 
-    document.recipient = _labeled(text, ("수신자", "수신처", "수신", "귀하", "납품처", "발주처", "고객명", "고객사", "Messrs", "MESSRS", "Messrs.", "To", "TO", "to"))
+    document.recipient = _labeled(text, EXTRACTION_RULES["수신자"]["labels"])
     if document.recipient.raw:
         cleaned_rec = re.sub(r"^(?:Messrs\.?|To\b\.?|To\b|업\s*체\s*명|처\s*상\s*호|수\s*신\s*처\s*상\s*호|상\s*호|수\s*신\s*자?|고\s*객\s*명|고\s*객\s*사)\s*[:：.]?\s*", "", document.recipient.raw, flags=re.I).strip(" .:,;|-")
         cleaned_rec = re.split(r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)", cleaned_rec, flags=re.I)[0].strip(" .:,;|-")
@@ -1032,7 +1134,7 @@ def extract_document(
 
     document.contact_person = _labeled(
         text,
-        ("담당자", "담당자명", "예약 담당자", "예약담당자", "담당", "작성자", "발신인"),
+        EXTRACTION_RULES["담당자"]["labels"],
         validator=_is_contact_person_candidate,
     )
     if document.contact_person.raw:
@@ -1048,7 +1150,7 @@ def extract_document(
             document.email = _evidence(found_email.group(0).strip(), cp_val, 0.9, inferred=True)
 
     if not document.phone.raw:
-        document.phone = _labeled(text, ("대표전화", "전화", "연락처", "휴대폰", "TEL/FAX", "TEL / FAX", "TEL", "tel", "Tel", "HP", "hp", "H.P", "Phone", "Mobile"), r"[0-9() .+-]{8,}")
+        document.phone = _labeled(text, EXTRACTION_RULES["전화번호"]["labels"], EXTRACTION_RULES["전화번호"]["pattern"])
     if not document.phone.raw:
         body_phone = re.search(r"(?:02|0[3-6]\d|01[016789])[- )]?\d{3,4}[- ]?\d{4}", text)
         if body_phone:
@@ -1060,12 +1162,12 @@ def extract_document(
             document.phone = _evidence(cleaned_p, document.phone.evidence, document.phone.confidence)
 
     if not document.email.raw:
-        document.email = _labeled(text, ("이메일", "email", "MAIL", "mail", "Mail", "E-MAIL", "E-mail"), r"[\w.+-]+@[\w.-]+")
+        document.email = _labeled(text, EXTRACTION_RULES["이메일"]["labels"], EXTRACTION_RULES["이메일"]["pattern"])
     if not document.email.raw:
         body_email = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
         if body_email:
             document.email = _evidence(body_email.group(0).strip(), body_email.group(0), 0.85, inferred=True)
-    document.account_holder = _labeled(text, ("예금주", "예금주명", "예금주(성명/상호)"))
+    document.account_holder = _labeled(text, EXTRACTION_RULES["통장사본"]["holder_labels"])
     if not document.account_holder.raw and kind == DocumentType.BANK_COPY:
         nim_match = re.search(r"([가-힣A-Za-z0-9()（）\[\]【】 \t]{2,30})\s*님", text)
         if nim_match:
@@ -1109,7 +1211,7 @@ def extract_document(
             cleaned_h += ")"
         if cleaned_h:
             document.account_holder = _evidence(cleaned_h, document.account_holder.evidence, document.account_holder.confidence)
-    document.account_number = _labeled(text, ("계좌번호", "계좌", "계변호", "입금안내", "입금은행", "입금처"), r"[0-9\s*\-]{6,}")
+    document.account_number = _labeled(text, EXTRACTION_RULES["통장사본"]["account_labels"], EXTRACTION_RULES["통장사본"]["account_pattern"])
     if not document.account_number.raw:
         acc_match = re.search(r"(?:계좌번호|계좌|계변호|입금계좌|입금안내|입금처)[^\d\n]{0,20}([0-9\-–—]{6,30})", text)
         if acc_match:
@@ -1149,7 +1251,7 @@ def extract_document(
         if m_prof and not document.contact_person.raw:
             document.contact_person = _evidence(m_prof.group(1).strip(), m_prof.group(0).strip(), 0.88)
 
-    document.quote_date = _date_evidence(text, ("견적일자", "견적일", "견적제출일", "제출일", "발행일자", "발행일", "작성일", "일자", "일 자"))
+    document.quote_date = _date_evidence(text, EXTRACTION_RULES["견적일자"]["labels"])
     if not document.quote_date.raw:
         date_matches = list(_DATE_RE.finditer(text))
         if date_matches:
@@ -1172,73 +1274,31 @@ def extract_document(
 
     document.expiry_date = calculate_expiry(text, document.quote_date)
     if kind in (DocumentType.QUOTE, DocumentType.CONSTRUCTION_CONFIRMATION):
+        total_rules = EXTRACTION_RULES["견적총액"]
         # 1차: 최종 수정/할인/네고 금액 라벨 우선 탐색
         document.total = _amount_after_label(
             text,
-            (
-                "Revised Price", "Revised Amount", "RevisedPrice", "RevisedAmount",
-                "최종 견적", "최종견적", "최종금액", "결제금액", "네고금액", "조정금액", "D/C적용금액",
-            ),
+            total_rules["revised_labels"],
             exclude_keywords=("별도", "제외", "excl"),
         )
         # 2차: 명시적 부가세 포함 최종 합계 라벨 탐색
         if document.total.value is None:
             document.total = _amount_after_label(
                 text,
-                (
-                    "부가가치세(10%) 포함 총 공급 가액", "부가가치세(10%) 포함 총 공급가액",
-                    "부가가치세(10%)포함 총 공급 가액", "부가가치세(10%)포함 총 공급가액",
-                    "부가가치세 포함 총 공급 가액", "부가가치세 포함 총 공급가액",
-                    "부가가치세포함 총 공급 가액", "부가가치세포함 총 공급가액", "부가가치세 포함 총공급가액",
-                    "부가세 포함 총 공급가액", "부가세 포함 총공급가액", "부가세포함 총 공급가액", "부가세포함 총공급가액",
-                    "VAT 포함 총 공급가액", "VAT 포함 총공급가액", "VAT포함 총 공급가액", "VAT포함 총공급가액",
-                    "총계(VAT 포함)", "총계 (VAT 포함)", "총계(VAT포함)", "총계 (VAT포함)",
-                    "총계(부가세 포함)", "총계 (부가세 포함)", "총계(부가세포함)", "총계 (부가세포함)",
-                    "총계(부가가치세 포함)", "총계 (부가가치세 포함)", "총계(부가가치세포함)", "총계 (부가가치세포함)",
-                    "합계금액(부가세포함)", "합계금액 (부가세포함)", "합계금액(VAT포함)", "합계금액 (VAT포함)",
-                    "합계금액(부가가치세포함)", "합계금액 (부가가치세포함)",
-                    "합계(부가세포함)", "합계 (부가세포함)", "합계(VAT포함)", "합계 (VAT포함)",
-                    "합계(부가가치세포함)", "합계 (부가가치세포함)",
-                    "합계금(부가세포함)", "합계금 (부가세포함)", "합계금(VAT포함)", "합계금 (VAT포함)",
-                    "제안가(부가세포함)", "제안가 (부가세포함)", "제안가(VAT포함)", "제안가 (VAT포함)",
-                    "제안가격(부가세포함)", "제안가격 (부가세포함)", "제안가격(VAT포함)", "제안가격 (VAT포함)",
-                    "TOTAL (+VAT)", "TOTAL(+VAT)", "TOTAL (VAT)", "TOTAL(VAT)",
-                    "TOTAL AMOUNT. (VAT 포함)", "TOTAL AMOUNT (VAT 포함)", "TOTAL AMOUNT(VAT 포함)", "TOTAL AMOUNT (VAT포함)",
-                    "TOTAL AMOUNT.(VAT 포함)", "TOTAL AMOUNT.(VAT포함)",
-                    "예정금액(부가가치세포함)", "예정금액 (부가가치세포함)",
-                    "예정금액(부가세포함)", "예정금액 (부가세포함)",
-                    "예정금액부가가치세포함", "예정금액부가세포함",
-                    "공사예정금액부가가치세포함", "공사예정금액부가세포함",
-                    "아래와 같이 견적합니다", "아래와같이 견적합니다", "아래와 같이 견적하나이다",
-                    "견적금액(VAT포함)", "견적금액 (VAT포함)", "견적금액(부가세포함)", "견적금액 (부가세포함)",
-                    "견적금액", "견적 금액", "견적총액", "견적 총액",
-                ),
+                total_rules["vat_inclusive_labels"],
                 exclude_keywords=("별도", "제외", "excl"),
             )
         # 3차: 일반 합계/총액 라벨 탐색
         if document.total.value is None:
             document.total = _amount_after_label(
                 text,
-                (
-                    "견적합계금액", "전체합계", "합계금액", "총합계금액", "총합계", "합계금",
-                    "합계(Total)", "합계 (Total)", "합계(total)", "합계 (total)",
-                    "제안공급가", "제안가격", "공급총액", "총 공급 가액", "총 공급가액", "총공급가액", "총공급대가",
-                    "예정금액", "공사예정금액", "설치예정금액", "사업비", "소요예산",
-                    "합계", "총계", "총액",
-                    "공급대가", "공사금액", "금액", "Total Amount", "TOTAL AMOUNT", "Total", "TOTAL",
-                ),
+                total_rules["general_total_labels"],
                 exclude_keywords=("별도", "제외", "excl"),
             )
-        document.vat = _amount_after_label(text, ("부가세", "부가가치세", "세액", "VAT"))
+        document.vat = _amount_after_label(text, total_rules["vat_labels"])
         document.subtotal = _amount_after_label(
             text,
-            (
-                "공급가액", "공급가", "Subtotal", "소계",
-                "합계금액(부가세별도)", "합계금액 (부가세별도)", "합계(부가세별도)", "합계 (부가세별도)",
-                "합계금액(VAT별도)", "합계금액 (VAT별도)", "합계(VAT별도)", "합계 (VAT별도)",
-                "제안가(부가세별도)", "제안가 (부가세별도)", "제안가(VAT별도)", "제안가 (VAT별도)",
-                "제안가격(부가세별도)", "제안가격 (부가세별도)",
-            ),
+            total_rules["subtotal_labels"],
             exclude_keywords=("포함", "inc"),
         )
         document.items = _extract_items(text)

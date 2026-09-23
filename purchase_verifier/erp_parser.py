@@ -79,8 +79,16 @@ def check_nts_business(biz_no_str: str) -> str:
                     return "🚨 휴업자"
                 elif stt_cd == "03":
                     return "🚨 폐업자"
+        elif res.status_code == 401:
+            return "⚠️ 국세청 인증실패(API 키 확인 필요)"
+        elif res.status_code == 429:
+            return "⚠️ 조회한도 초과(잠시 후 다시 시도)"
+        elif res.status_code >= 500:
+            return f"⚠️ 국세청 서버오류({res.status_code})"
+    except requests.exceptions.Timeout:
+        return "⚠️ 국세청 응답지연(Timeout)"
     except Exception as e:
-        return f"⚠️ 조회실패(서버오류: {e})"
+        return f"⚠️ 조회실패(네트워크오류: {e})"
 
     return "⚠️ 조회실패"
 
@@ -361,52 +369,55 @@ def is_software_item(clean_name: str, raw_cat: str = "") -> bool:
     return any(kw in clean_name for kw in sw_kws) or "소프트웨어" in raw_cat.lower()
 
 
-def guess_category_by_keyword(name: str, price: int, unit_price: int = 0) -> str:
-    """품목명 및 단가 기반 물품분류구분 (비품/소모품/구성품/용역/공사) 추천.
-    
-    세종대학교 기준:
-    - 집기: 15만원 이상 비품 (15만원 미만 소모품)
-    - 기계기구/일반장비: 30만원 이상 비품 (30만원 미만 소모품)
-    - 소프트웨어: 사용기간 1년 이상 & 200만원 이상 비품 (그 외 소모품)
-    - 집기/기계기구는 뭉뚱그려 '비품'으로 통일 표기
-    """
-    clean_name = name.replace(" ", "").lower()
-    chk_price = unit_price if unit_price > 0 else price
-
-    # 1. 구성품 키워드
-    component_kws = ["구성품", "부속품", "옵션모듈", "확장보드", "추가모듈", "장착키트", "브라켓", "확장카드"]
-    if any(kw in clean_name for kw in component_kws):
-        return "구성품"
-
-    # 2. 소프트웨어 (1년 이상 사용 & 200만원 이상 비품, 그 외 소모품)
-    if is_software_item(clean_name):
-        is_short_term = any(kw in clean_name for kw in ["월간", "1개월", "3개월", "6개월", "단기"])
-        if price >= 2000000 and not is_short_term:
-            return "비품"
-        return "소모품"
-
-    # 3. 집기류 (15만원 이상 비품, 15만원 미만 소모품)
-    if is_fixture_item(clean_name):
-        return "비품" if chk_price >= 150000 else "소모품"
-
-    # 4. 순수 소모품 키워드
+def is_consumable_item(clean_name: str, raw_cat: str = "") -> bool:
+    """소모성 품목 여부 판별 (시약, 케이블, 필터, 토너, 용지, 배터리, 마스크, 장갑, 초자류 등)."""
     consumable_kws = [
         "시약", "용액", "항체", "키트", "kit", "튜브", "팁", "케이블", "부품", "커버", "케이스",
         "필터", "토너", "잉크", "용지", "리필", "건전지", "배터리", "소모품", "초자", "웨이퍼",
         "타겟", "기판", "가스", "질소", "마우스", "사료", "시편", "필름", "테이프", "마스크",
-        "장갑", "방진복", "소모", "유리관", "페트리", "비커", "플라스크", "피펫"
+        "장갑", "방진복", "소모", "유리관", "페트리", "비커", "플라스크", "피펫",
+        "문구", "사무용품", "필기구", "볼펜", "포스트잇", "박스", "세척액", "알코올", "에탄올",
     ]
-    if any(kw in clean_name for kw in consumable_kws):
+    return any(kw in clean_name for kw in consumable_kws) or "소모품" in raw_cat
+
+
+def guess_category_by_keyword(name: str, price: int = 0, unit_price: int = 0, raw_cat: str = "") -> str:
+    """품목명 기반 물품분류구분 (비품/소모품/구성품/용역/공사) 추천.
+    
+    세종대학교 기준:
+    - 집기류(책상, 의자 등): 단가와 무관하게 품목 성격상 '비품'
+    - 기계기구/일반장비(모니터, PC, 분석기 등): 단가와 무관하게 품목 성격상 '비품'
+    - 소프트웨어: '비품'
+    - 구성품: '구성품'
+    - 순수 소모품(시약, 케이블, 토너, 마스크 등): '소모품'
+    ※ 단가 기준(15만/30만/200만)은 분류가 아닌 오직 '자산등록여부(예/아니오)'만 판정합니다.
+    """
+    clean_name = name.replace(" ", "").lower()
+
+    # 1. 구성품 키워드
+    component_kws = ["구성품", "부속품", "옵션모듈", "확장보드", "추가모듈", "장착키트", "브라켓", "확장카드"]
+    if any(kw in clean_name for kw in component_kws) or raw_cat == "구성품":
+        return "구성품"
+
+    # 2. 소프트웨어 (비품)
+    if is_software_item(clean_name, raw_cat):
+        return "비품"
+
+    # 3. 집기류 (단가 15만원 미만이어도 본질상 비품)
+    if is_fixture_item(clean_name, raw_cat):
+        return "비품"
+
+    # 4. 순수 소모품 키워드
+    if is_consumable_item(clean_name, raw_cat):
         return "소모품"
 
-    # 5. 시제작품 / 시작품 / 시제품 제작 (세종대 실무 기준: 용역이 아닌 물품구매로 처리)
-    # 단가 30만원 이상 완제품/모듈 형태는 '비품', 30만원 미만 단순 소모성 시편 등은 '소모품'
+    # 5. 시제작품 / 시작품 / 시제품 제작 (세종대 실무 기준: 용역이 아닌 물품구매(비품)로 처리)
     prototype_kws = ["시제작", "시작품", "시제품", "로봇제작", "기구제작", "의족제작", "mockup", "목업"]
     if any(kw in clean_name for kw in prototype_kws):
-        return "비품" if chk_price >= 300000 else "소모품"
+        return "비품"
 
-    # 6. 기계기구 및 일반 연구장비/물품 (30만원 이상 비품, 30만원 미만 소모품)
-    return "비품" if chk_price >= 300000 else "소모품"
+    # 6. 기계기구 및 일반 연구장비/물품 (모니터, 컴퓨터 등 내구재는 기본적으로 비품)
+    return "비품"
 
 
 def generate_opinion(
@@ -449,10 +460,10 @@ def generate_opinion(
         is_sw = is_software_item(clean_n, erp_cat)
         is_fix = is_fixture_item(clean_n, erp_cat)
 
-        # 1) 단가 및 품목 유형별 물품등록여부 검증 (세종대학교 기준)
-        # - 소프트웨어: 1년 이상 사용 & 200만원 이상만 등록대상
-        # - 집기: 15만원 이상 등록대상
-        # - 기계기구/일반물품: 30만원 이상 등록대상
+        # 1) 단가 및 품목 유형별 물품등록여부 검증 (자산등록 대상 여부만 판정)
+        chk_price = unit_price if unit_price > 0 else price
+        is_consumable = is_consumable_item(clean_n, erp_cat)
+
         if is_sw:
             is_short = any(kw in clean_n for kw in ["월간", "1개월", "3개월", "6개월", "단기"])
             if (price < 2000000 or is_short) and "예" in reg_status:
@@ -460,14 +471,17 @@ def generate_opinion(
             elif (price >= 2000000 and not is_short) and "아니오" in reg_status:
                 rules_triggered.append("물품등록여부 변경필요")
         elif is_fix:
-            if unit_price >= 150000 and "아니오" in reg_status:
+            if chk_price >= 150000 and "아니오" in reg_status:
                 rules_triggered.append("물품등록여부 변경필요")
-            elif unit_price > 0 and unit_price < 150000 and "예" in reg_status:
+            elif chk_price > 0 and chk_price < 150000 and "예" in reg_status:
+                rules_triggered.append("물품등록여부 변경필요")
+        elif is_consumable:
+            if "예" in reg_status:
                 rules_triggered.append("물품등록여부 변경필요")
         else:
-            if unit_price >= 300000 and "아니오" in reg_status:
+            if chk_price >= 300000 and "아니오" in reg_status:
                 rules_triggered.append("물품등록여부 변경필요")
-            elif unit_price > 0 and unit_price < 300000 and "예" in reg_status:
+            elif chk_price > 0 and chk_price < 300000 and "예" in reg_status:
                 rules_triggered.append("물품등록여부 변경필요")
 
         # 2) 물품분류구분 판정 (허용값: 비품 / 소모품 / 구성품 / 용역 / 공사)
@@ -478,7 +492,7 @@ def generate_opinion(
         elif erp_cat == "구성품":
             exp_cat = "구성품"
         else:
-            exp_cat = guess_category_by_keyword(name, price, unit_price)
+            exp_cat = guess_category_by_keyword(name, price, unit_price, erp_cat)
 
         expected_cats.append(exp_cat)
 
@@ -509,7 +523,27 @@ def generate_opinion(
 
 
 def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -> list[dict[str, Any]]:
-    """ERP 품목과 견적서 추출 품목 간 문자열 유사도 및 금액 기반 스마트 매칭."""
+    """ERP 품목과 견적서 추출 품목 간 문자열 유사도 및 금액 기반 스마트 매칭.
+    
+    1. 개별 행 1:1 매칭 우선 탐색
+    2. 조립PC/공사/용역/세트상품 등 품목명·행수가 다르더라도, 총액이 일치하면 산출내역서 형태로 동일 구매 추정
+    """
+    if not erp_items:
+        return []
+
+    # 전체 총액 계산 (공급가액 및 VAT 포함 여부 판정)
+    total_erp = sum(safe_int(i.get("price", 0)) for i in erp_items)
+    total_doc = sum(
+        safe_int(getattr(d, "amount", 0) if hasattr(d, "amount") else d.get("금액", 0)) or
+        (safe_int(getattr(d, "unit_price", 0) if hasattr(d, "unit_price") else d.get("단가", 0)) *
+         safe_int(getattr(d, "quantity", 1) if hasattr(d, "quantity") else d.get("수량", 1)))
+        for d in doc_items
+    )
+
+    is_total_exact = (total_erp > 0 and total_doc > 0 and total_erp == total_doc)
+    is_total_vat = (total_erp > 0 and total_doc > 0 and (total_erp == round(total_doc * 1.1) or abs(total_erp - round(total_doc * 1.1)) <= 10))
+    is_total_matched = is_total_exact or is_total_vat
+
     match_results = []
     for erp_itm in erp_items:
         erp_name = str(erp_itm.get("name", ""))
@@ -546,7 +580,7 @@ def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -
                 best_doc_qty = doc_qty
                 best_doc_amount = doc_amount
 
-        is_matched = best_score >= 400 or best_score >= 50
+        is_matched = best_score >= 400 or (best_score >= 50 and price_score > 0) or (best_score >= 60 and erp_price == 0)
         name_status = "✅ 매칭 성공" if is_matched else "🚨 매칭 실패"
         qty_status = (
             "✅ 일치"
@@ -577,6 +611,41 @@ def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -
             "금액 검증": amt_status,
             "최종 판정": name_status,
         })
+
+    # -------------------------------------------------------------
+    # 🌟 2단계: 총액 기준 산출내역서/동일구매 추정 (조립PC/공사/용역 등 N:1 또는 세부내역 합산)
+    # -------------------------------------------------------------
+    unmatched_indices = [
+        i for i, r in enumerate(match_results)
+        if "실패" in r["최종 판정"] or "차액" in r["금액 검증"] or "다름" in r["수량 검증"]
+    ]
+
+    if unmatched_indices and is_total_matched:
+        # Case A: ERP 품목이 1건이고 견적서 품목이 여러 건인 경우 (1대/1식 <-> N건 세부 산출내역서)
+        if len(erp_items) == 1 and len(doc_items) >= 2:
+            d_names = [getattr(d, "name", "") if hasattr(d, "name") else d.get("품명", "") for d in doc_items]
+            preview = ", ".join(n for n in d_names if n)[:40]
+            amt_label = f"✅ 합산 일치 ({total_doc:,}원)" if is_total_exact else f"✅ VAT(10%) 합산 일치 ({total_doc:,}원 ➔ {total_erp:,}원)"
+            match_results[0].update({
+                "견적서 매칭 품명": f"세부내역 {len(doc_items)}건 합산 ({preview}...)",
+                "매칭 기준": "💰 총액 기준 세부내역 합산",
+                "수량 검증": "✅ 1식/산출내역 구성",
+                "금액 검증": amt_label,
+                "최종 판정": "✅ 총액 기반 산출내역 일치",
+            })
+        # Case B: 전체 품목들이 1:1로 매칭되지 않았으나 전체 총액이 일치하는 경우
+        # (우연의 일치로 통과되는 위험을 방지하기 위해 완전 통과 대신 '보류 / 담당자 확인필요'로 처리)
+        elif len(unmatched_indices) == len(erp_items):
+            for idx in unmatched_indices:
+                amt_label = f"ℹ️ 총액만 일치 ({total_erp:,}원)" if is_total_exact else f"ℹ️ VAT(10%) 총액 일치 ({total_doc:,}원 ➔ {total_erp:,}원)"
+                match_results[idx].update({
+                    "견적서 매칭 품명": f"견적서 세부 {len(doc_items)}건과 총액만 일치 (품명 상이)",
+                    "매칭 기준": "⚠️ 총액 일치 (동일구매 추정)",
+                    "수량 검증": "⚠️ 대조 불가 (확인필요)",
+                    "금액 검증": amt_label,
+                    "최종 판정": "⚠️ 담당자 확인필요 (총액 일치)",
+                })
+
     return match_results
 
 
@@ -594,7 +663,11 @@ def build_smart_matrix(documents: list[Any], erp_items: list[dict[str, Any]]) ->
     if not quotes:
         return pd.DataFrame([{"안내": "비교할 견적서가 없습니다."}])
 
-    target = min(quotes, key=lambda q: (getattr(getattr(q, "total", None), "value", None) or 0)) if quotes else quotes[0]
+    quotes_with_total = [
+        q for q in quotes
+        if getattr(getattr(q, "total", None), "value", None) is not None
+    ]
+    target = min(quotes_with_total, key=lambda q: q.total.value) if quotes_with_total else quotes[0]
     doc_items = getattr(target, "items", []) or []
     if not doc_items:
         return pd.DataFrame([{"안내": f"선택된 견적서({getattr(target, 'filename', '견적서')})에서 추출된 세부 품목이 없습니다."}])
@@ -608,16 +681,33 @@ def save_to_cache(req_no: str, meta_data: dict[str, Any], raw_data: dict[str, An
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 cache = json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            import shutil
+            backup_file = f"{CACHE_FILE}.bak_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+            try:
+                shutil.copy2(CACHE_FILE, backup_file)
+                print(f"[Cache Warning] {CACHE_FILE} 파싱 실패로 백업본({backup_file})을 생성했습니다: {e}")
+            except Exception:
+                pass
+            cache = {}
 
     existing_record = cache.get(req_no, {"meta": {}, "raw": {}})
     existing_record["meta"].update(meta_data)
     existing_record["raw"].update(raw_data)
     cache[req_no] = existing_record
 
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    temp_file = f"{CACHE_FILE}.tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(temp_file, CACHE_FILE)
+    except Exception as e:
+        print(f"[Cache Error] 캐시 파일 원자적 저장 실패: {e}")
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
 
 def get_cache_list() -> list[dict[str, Any]]:
@@ -636,6 +726,7 @@ def get_cache_list() -> list[dict[str, Any]]:
                 "연구책임자정보": meta.get("연구책임자정보", ""),
                 "물품담당자": meta.get("물품담당자", ""),
                 "업체명": meta.get("업체명", ""),
+                "대표자명": meta.get("대표자명", ""),
                 "업체담당자정보": meta.get("업체담당자정보", ""),
             })
         return result[::-1]

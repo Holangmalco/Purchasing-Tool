@@ -46,6 +46,7 @@ st.set_page_config(page_title="구매추출기 통합 대시보드", page_icon="
 SESSION_REQ_KEY = "req_analysis_done"
 SESSION_MANUAL_JSON_KEY = "manual_json_data"
 SESSION_DOCS_KEY = "purchase_documents"
+SESSION_AUTO_CACHED_KEY = "has_auto_cached_current_analysis"
 
 
 # ---------------------------------------------------------
@@ -227,7 +228,7 @@ def main() -> None:
         start_analysis = st.button("🚀 전체 데이터 통합 분석 시작", type="primary", use_container_width=True)
     with col_btn2:
         if st.button("🔄 전체 초기화", use_container_width=True):
-            for k in ["erp_raw_req", "erp_raw_fin", "erp_raw_itm", SESSION_REQ_KEY, SESSION_DOCS_KEY, SESSION_MANUAL_JSON_KEY]:
+            for k in ["erp_raw_req", "erp_raw_fin", "erp_raw_itm", SESSION_REQ_KEY, SESSION_DOCS_KEY, SESSION_MANUAL_JSON_KEY, SESSION_AUTO_CACHED_KEY]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -250,6 +251,7 @@ def main() -> None:
 
         st.session_state[SESSION_DOCS_KEY] = documents
         st.session_state[SESSION_REQ_KEY] = True
+        st.session_state[SESSION_AUTO_CACHED_KEY] = False
 
     # ---------------------------------------------------------
     # [STEP 2] 분석 결과 대시보드 표출
@@ -489,11 +491,12 @@ def main() -> None:
             st.dataframe(smart_df, use_container_width=True, hide_index=True)
 
         # ---------------------------------------------------------
-        # 거래처 마스터 DB 자동 캐싱 및 보완 안내
+        # 거래처 마스터 DB 자동 캐싱 및 보완 안내 (분석 1회당 1번만 갱신)
         # ---------------------------------------------------------
-        if not auto_reject_reasons and documents:
+        if not auto_reject_reasons and documents and not st.session_state.get(SESSION_AUTO_CACHED_KEY):
             try:
                 cached_res = auto_cache_verified_documents(documents)
+                st.session_state[SESSION_AUTO_CACHED_KEY] = True
                 if cached_res:
                     st.toast(f"🏢 거래처 마스터 DB 등록/갱신: {cached_res['vendor_name']} ({cached_res['business_number']})", icon="💾")
             except Exception:
@@ -542,10 +545,14 @@ def main() -> None:
         if item_list and doc_items:
             matches = smart_item_matching(item_list, doc_items)
             failed = [m for m in matches if "실패" in m.get("최종 판정", "") or "다름" in m.get("수량 검증", "") or "차액" in m.get("금액 검증", "")]
+            pending = [m for m in matches if "확인필요" in m.get("최종 판정", "")]
+            doc_name_str = f"({target_doc.filename})" if target_doc else ""
+
             if failed:
                 st.warning(f"⚠️ ERP 품목과 견적서 간 불일치(품명·수량·금액) 주의 항목이 {len(failed)}건 있습니다. 아래 대조표를 확인하세요.")
+            elif pending:
+                st.info(f"🔍 총액은 일치하지만 개별 품명이 상이하여 담당자 확인이 필요한 항목이 {len(pending)}건 있습니다 (보류/확인요망). 아래 대조표를 확인하세요.")
             else:
-                doc_name_str = f"({target_doc.filename})" if target_doc else ""
                 st.success(f"✅ ERP 입력 품목 {len(matches)}건 전체가 견적서{doc_name_str} 품목·수량·금액과 정상 매칭되었습니다.")
             matching_df = pd.DataFrame(matches)
             st.dataframe(matching_df, use_container_width=True, hide_index=True)
@@ -588,9 +595,14 @@ def main() -> None:
         # ---------------------------------------------------------
         # 📁 업체 정보 추출값 (의견 생성 및 원클릭 보드용)
         # ---------------------------------------------------------
-        def_ven = manual_ai.get("업체명") or (target_doc.vendor_name.raw if target_doc else "")
-        def_biz = manual_ai.get("사업자번호") or (target_doc.business_number.raw if target_doc else "")
-        def_rep = manual_ai.get("담당자") or (target_doc.contact_person.raw if target_doc else "")
+        license_doc = next((d for d in documents if d.document_type == DocumentType.BUSINESS_LICENSE), None)
+        cand_ven = (target_doc.vendor_name.raw if target_doc and target_doc.vendor_name.raw else "") or (license_doc.vendor_name.raw if license_doc and license_doc.vendor_name.raw else "")
+        def_ven = manual_ai.get("업체명") or cand_ven
+        cand_biz = (target_doc.business_number.raw if target_doc and target_doc.business_number.raw else "") or (license_doc.business_number.raw if license_doc and license_doc.business_number.raw else "")
+        def_biz = manual_ai.get("사업자번호") or cand_biz
+        cand_rep = (target_doc.representative.raw if target_doc and target_doc.representative.raw else "") or (license_doc.representative.raw if license_doc and license_doc.representative.raw else "")
+        def_rep = manual_ai.get("대표자명") or cand_rep
+        def_contact = manual_ai.get("담당자") or (target_doc.contact_person.raw if target_doc else "")
         def_phn = manual_ai.get("연락처") or (target_doc.phone.raw if target_doc else "")
         def_eml = manual_ai.get("이메일") or (target_doc.email.raw if target_doc else "")
 
@@ -606,7 +618,7 @@ def main() -> None:
             total_erp_amt or doc_total,
             item_list,
             raw_fin,
-            vendor_contact=def_rep or def_phn or def_eml,
+            vendor_contact=def_contact or def_phn or def_eml,
         )
         st.code(opinion_text, language="text")
 
@@ -616,18 +628,20 @@ def main() -> None:
         st.divider()
         st.markdown("#### 📁 업체 정보 통합 및 ✨ 원클릭 복사 보드")
 
-        c_v1, c_v2, c_v3, c_v4, c_v5 = st.columns(5)
-        with c_v1: t_ven = st.text_input("업체명", value=def_ven)
-        with c_v2: t_biz = st.text_input("사업자번호", value=def_biz)
-        with c_v3: t_rep = st.text_input("담당자명", value=def_rep)
-        with c_v4: t_phn = st.text_input("연락처", value=def_phn)
-        with c_v5: t_eml = st.text_input("이메일", value=def_eml)
+        c_v1, c_v2, c_v3, c_v4, c_v5, c_v6 = st.columns(6)
+        with c_v1: t_ven = st.text_input("업체명", value=def_ven, key="in_vendor_name")
+        with c_v2: t_biz = st.text_input("사업자번호", value=def_biz, key="in_biz_num")
+        with c_v3: t_rep = st.text_input("대표자명(CEO)", value=def_rep, key="in_representative")
+        with c_v4: t_contact = st.text_input("담당자명(실무)", value=def_contact, key="in_contact_person")
+        with c_v5: t_phn = st.text_input("연락처", value=def_phn, key="in_phone")
+        with c_v6: t_eml = st.text_input("이메일", value=def_eml, key="in_email")
 
         st.caption("✨ **원클릭 복사 보드 (우측 📋 아이콘 클릭)**")
-        c_cp1, c_cp2, c_cp3 = st.columns([1, 1, 2])
+        c_cp1, c_cp2, c_cp3, c_cp4 = st.columns([1.2, 1.2, 1.0, 2.2])
         with c_cp1: st.code(t_ven or "업체명 없음", language=None)
         with c_cp2: st.code(t_biz or "사업자번호 없음", language=None)
-        with c_cp3: st.code(f"{t_rep or '담당자'} / {t_phn or '연락처'} / {t_eml or '이메일'}", language=None)
+        with c_cp3: st.code(t_rep or "대표자 없음", language=None)
+        with c_cp4: st.code(f"{t_contact or '담당자'} / {t_phn or '연락처'} / {t_eml or '이메일'}", language=None)
 
         # 추천 폴더명 자동 생성
         now = datetime.date.today()
@@ -668,7 +682,8 @@ def main() -> None:
                 "연구책임자정보": base_data.get("pi_formatted", ""),
                 "물품담당자": item_list[0]["contact"] if item_list else "미기재",
                 "업체명": t_ven,
-                "업체담당자정보": f"{t_rep} / {t_phn} / {t_eml}",
+                "대표자명": t_rep,
+                "업체담당자정보": f"{t_contact} / {t_phn} / {t_eml}",
                 "사업자번호": t_biz,
                 "계좌번호": t_acc_num,
                 "예금주": t_acc_holder,
