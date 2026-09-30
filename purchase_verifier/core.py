@@ -232,17 +232,23 @@ def is_valid_business_number(value: str) -> bool:
 def _is_iacf_text(text: str) -> bool:
     """영문 산학협력단(IACF) 표기 여부 확인.
     
-    규정: 영문 견적서의 경우 'industry-academic cooperation foundation' 또는
+    규정: 영문 견적서의 경우 'industry-academic/academy/academia cooperation foundation' 또는
     약자 'iacf'가 포함되어 있어야 정식 산학협력단 수신자로 인정.
+    개행 또는 공백 변형도 포괄하여 매칭.
     """
     if not text:
         return False
     t = text.lower()
-    # 1. industry-academic cooperation foundation 및 변형 (하이픈, 띄어쓰기 유연 매칭)
-    if re.search(r"industry[- ]?(?:academic|academia|university)\s+cooperation\s+foundation", t):
+    # 1. industry-academic/academy/academia/university cooperation foundation 및 변형 (하이픈, 띄어쓰기, 개행 유연 매칭)
+    if re.search(r"industry[- ]?(?:academic|academia|academy|university)[\s\n]+cooperation(?:[\s\n]+foundation)?", t):
+        return True
+    if re.search(r"industry[- ]?(?:academic|academia|academy|university)[\s\n]+foundation", t):
         return True
     # 2. 약자 iacf (단독 단어 매칭)
     if re.search(r"\b(?:sju[-_ ]?)?iacf\b", t):
+        return True
+    # 3. cooperation foundation + sejong
+    if re.search(r"cooperation[\s\n]+foundation", t) and ("sejong" in t or "sju" in t):
         return True
     return False
 
@@ -1183,25 +1189,37 @@ def extract_document(
             flags=re.I,
         ).strip(" .:,;|-")
         cleaned_rec = re.split(
-            r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
+            r"(?:Quotation\s*#?|Quote\s*#?|DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
             cleaned_rec,
             flags=re.I,
         )[0].strip(" .:,;|-")
 
-        # 2. 인접 윈도우 스캔 (2줄 분리 인쇄 병합: 공급자가 좌측이든 우측이든 산학협력단이 포함된 인접 행 탐색)
+        # 2. 인접 윈도우 스캔 (2~3줄 분리 인쇄 병합: TO: 옆에 사람이름이 오거나 기관명이 다음 줄에 개행된 경우 포함)
         if rec_line_idx != -1 and not any(k in normalize_name(cleaned_rec) for k in ("산단", "산학협력")) and not _is_iacf_text(cleaned_rec):
-            for next_idx in range(rec_line_idx + 1, min(rec_line_idx + 3, len(lines))):
+            for next_idx in range(rec_line_idx + 1, min(rec_line_idx + 4, len(lines))):
                 l_next = lines[next_idx]
-                m_san = re.search(r"(산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?|산[\s/·\-]*단|\biacf\b|industry[- ]?academic[^\n]*)", l_next, re.I)
+                m_san = re.search(r"(세종[\s/·\-]*대[\s/·\-]*학[\s/·\-]*교[^\n]*|산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?|산[\s/·\-]*단|\biacf\b|sejong\s+univ[^\n]*|industry[- ]?(?:academic|academy|academia)[^\n]*|cooperation[\s\n]+foundation|\bfoundation\b)", l_next, re.I)
                 if m_san:
                     sub_part = m_san.group(1).strip(" .:,;|-")
-                    sub_part = re.split(r"(?:공\s*급\s*자|\s+상\s*호|등\s*록|사\s*업\s*자|주\s*소|전\s*화|TEL|일\s*자)", sub_part)[0].strip(" .:,;|-")
+                    sub_part = re.split(r"(?:공\s*급\s*자|\s+상\s*호|등\s*록|사\s*업\s*자|주\s*소|전\s*화|TEL|일\s*자|Issued\s*By)", sub_part, flags=re.I)[0].strip(" .:,;|-")
                     sub_part = re.sub(r"\s*귀\s*[하중]", "", sub_part).strip(" .:,;|-")
                     sub_part = re.sub(r"산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?", "산학협력단", sub_part)
                     sub_part = re.sub(r"산[\s/·\-]*단", "산단", sub_part)
                     if sub_part:
-                        cleaned_rec = f"{cleaned_rec} {sub_part}".strip()
+                        if not any(k in normalize_name(cleaned_rec) for k in ("세종", "sejong")) and any(k in normalize_name(sub_part) for k in ("세종", "sejong")):
+                            cleaned_rec = sub_part
+                        else:
+                            cleaned_rec = f"{cleaned_rec} {sub_part}".strip()
                         evidence_line = f"{evidence_line} / {l_next.strip()}"
+                        # 3번째 줄에 Foundation이나 산학협력단이 또 나뉜 경우 (예: Sejong Univ... \n Foundation)
+                        if next_idx + 1 < len(lines):
+                            l_after = lines[next_idx + 1]
+                            m_after = re.search(r"(\bfoundation\b|산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?|산단)", l_after, re.I)
+                            if m_after:
+                                f_part = m_after.group(1).strip(" .:,;|-")
+                                f_part = re.sub(r"산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?", "산학협력단", f_part)
+                                cleaned_rec = f"{cleaned_rec} {f_part}".strip()
+                                evidence_line = f"{evidence_line} / {l_after.strip()}"
                         break
 
         if cleaned_rec:
@@ -1218,23 +1236,25 @@ def extract_document(
 
     if not has_full_sanhan:
         candidate_lines = []
-        for line in lines:
+        for idx, line in enumerate(lines):
             line_clean = re.sub(r"^[▪▶•\-\*\s]+", "", _clean_spaces(line)).strip()
             norm = normalize_name(line_clean)
             line_lower = line_clean.lower()
             is_ko_hit = ("세종" in norm or "산단" in norm or "산학협력" in norm) and not any(k in norm for k in ("공급자", "시공사", "발행처", "세무서", "견적서", "대관", "컨벤션센터", "운영관리"))
-            is_en_hit = (_is_iacf_text(line_lower) or ("sejong" in line_lower and ("univ" in line_lower or "iacf" in line_lower))) and not any(k in line_lower for k in ("vendor", "supplier", "issuer", "quotation", "quote"))
+            is_en_hit = (_is_iacf_text(line_lower) or ("sejong" in line_lower and ("univ" in line_lower or "iacf" in line_lower or "industry" in line_lower or "cooperation" in line_lower))) and not any(k in line_lower for k in ("vendor", "supplier", "issuer", "quotation", "quote"))
             if is_ko_hit or is_en_hit:
-                candidate_lines.append(line_clean)
+                candidate_lines.append((idx, line_clean))
         
+        chosen_idx = -1
         chosen_line = None
-        for cl in candidate_lines:
+        for c_idx, cl in candidate_lines:
             cl_norm = normalize_name(cl)
             if "산학협력" in cl_norm or "산단" in cl_norm or _is_iacf_text(cl):
                 chosen_line = cl
+                chosen_idx = c_idx
                 break
         if not chosen_line and candidate_lines:
-            chosen_line = candidate_lines[0]
+            chosen_idx, chosen_line = candidate_lines[0]
 
         if chosen_line:
             cleaned_rec = re.sub(r"^[▪▶•\-\*\s]+", "", chosen_line)
@@ -1249,8 +1269,25 @@ def extract_document(
                 cleaned_rec,
                 flags=re.I,
             )[0].strip(" .:,;|-")
+
+            # fallback 탐색에서도 인접 윈도우 스캔 (2줄 분리 개행된 산학협력단/Foundation 병합)
+            if chosen_idx != -1 and not any(k in normalize_name(cleaned_rec) for k in ("산단", "산학협력")) and not _is_iacf_text(cleaned_rec):
+                for next_idx in range(chosen_idx + 1, min(chosen_idx + 3, len(lines))):
+                    l_next = lines[next_idx]
+                    m_san = re.search(r"(산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?|산[\s/·\-]*단|\biacf\b|industry[- ]?(?:academic|academy|academia)[^\n]*|cooperation[\s\n]+foundation|\bfoundation\b)", l_next, re.I)
+                    if m_san:
+                        sub_part = m_san.group(1).strip(" .:,;|-")
+                        sub_part = re.split(r"(?:공\s*급\s*자|\s+상\s*호|등\s*록|사\s*업\s*자|주\s*소|전\s*화|TEL|일\s*자)", sub_part)[0].strip(" .:,;|-")
+                        sub_part = re.sub(r"\s*귀\s*[하중]", "", sub_part).strip(" .:,;|-")
+                        sub_part = re.sub(r"산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?", "산학협력단", sub_part)
+                        sub_part = re.sub(r"산[\s/·\-]*단", "산단", sub_part)
+                        if sub_part:
+                            cleaned_rec = f"{cleaned_rec} {sub_part}".strip()
+                            chosen_line = f"{chosen_line} / {l_next.strip()}"
+                            break
+
             if cleaned_rec:
-                if document.recipient.raw and any(k in normalize_name(document.recipient.raw) for k in ("세종", "sejong")) and not any(k in normalize_name(document.recipient.raw) for k in ("산단", "산학협력")):
+                if document.recipient.raw and any(k in normalize_name(document.recipient.raw) for k in ("세종", "sejong")) and not any(k in normalize_name(document.recipient.raw) for k in ("산단", "산학협력")) and not _is_iacf_text(document.recipient.raw):
                     document.recipient = _evidence(f"{document.recipient.raw} {cleaned_rec}".strip(), f"{document.recipient.evidence} + {chosen_line}", 0.88, inferred=True)
                 else:
                     document.recipient = _evidence(cleaned_rec, chosen_line, 0.85, inferred=True)

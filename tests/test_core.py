@@ -222,6 +222,23 @@ def test_recipient_sejong_sanhan_is_pass():
     assert recipient_check and recipient_check[0].status == VerificationStatus.PASS
 
 
+def test_recipient_english_multiline_iacf_is_pass():
+    text = (
+        "TO: Hwangseo Park Quotation #: 20260928-SU-HP-Cell\n"
+        "Sejong University Industry-Academy Cooperation\n"
+        "Foundation\n"
+        "209 Neungdong-ro, Kwangjin-gu\n"
+        "Item DESCRIPTION Total (US $)\n"
+        "1 Assay $3,506.40\n"
+    )
+    doc = extract_document(text, "foreign_quote.pdf")
+    assert "Industry-Academy Cooperation Foundation" in doc.recipient.raw
+    results = verify_documents([doc], "용역")
+    recipient_check = [r for r in results if r.name == "수신자 산학협력단"]
+    assert recipient_check and recipient_check[0].status == VerificationStatus.PASS
+
+
+
 def test_spaced_korean_labels_and_corporate_name():
     license_text = (
         "사 업 자 등 록 증\n"
