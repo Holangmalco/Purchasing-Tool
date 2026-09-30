@@ -117,7 +117,9 @@ def extract_local_text(uploaded_file) -> str:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for idx, page in enumerate(pdf.pages):
                 p_text = (page.extract_text() or "").strip()
-                if len(p_text) >= 30:
+                # 폰트 CID 글리프 깨짐 또는 유니코드 외계어 깨짐 감지 시 즉시 로컬 OCR로 전환
+                is_corrupted = p_text.count("(cid:") >= 3 or ("î" in p_text and "ð" in p_text)
+                if len(p_text) >= 30 and not is_corrupted:
                     page_texts.append((idx, p_text))
                 else:
                     pages_needing_ocr.append(idx)
@@ -303,6 +305,10 @@ def main() -> None:
                 "}"
             )
 
+            docs_text_section = "\n\n".join([f"=== [문서 파일명: {d.filename}] ===\n{d.raw_text.strip()}" for d in documents if d.raw_text.strip()])
+            if docs_text_section:
+                fallback_prompt += f"\n\n\n[첨부 서류 OCR 텍스트 원본]\n{docs_text_section}"
+
             with st.expander("💡 [외부 AI 우회 가이드] 제미나이 웹용 프롬프트 복사 & JSON 적용 폼", expanded=True):
                 st.info("1. 아래 프롬프트를 복사하여 제미나이(Gemini 3.8 Flash 등) 웹페이지에 서류 파일과 함께 붙여넣고 전송합니다.\n2. 결과 JSON 텍스트를 복사하여 아래에 붙여넣고 [수동 데이터 시스템 적용]을 누르면 대시보드에 즉시 반영됩니다.")
                 st.code(fallback_prompt, language="text")
@@ -394,10 +400,20 @@ def main() -> None:
                     amt_str = f" ({lowest.amount:,}원)" if lowest.amount is not None else " (금액 미확정)"
                     st.info(f"{badge}\n\n**{lowest.candidate_filename}**{amt_str}")
 
-        # ---------------------------------------------------------
-        # 서류 교차 검증 및 국세청 조회
-        # ---------------------------------------------------------
-        results = verify_documents(documents, purchase_type="공사" if "공사" in req_type else "물품", selected_filename=selected_filename)
+        # 기준일자: ERP 구매요청서 일자가 있으면 파싱하여 전달 (과거 서류 유효기간 오판 방지)
+        ref_date = None
+        if base_data.get("req_date"):
+            try:
+                ref_date = datetime.date.fromisoformat(base_data["req_date"])
+            except Exception:
+                pass
+
+        results = verify_documents(
+            documents,
+            purchase_type="공사" if "공사" in req_type else "물품",
+            selected_filename=selected_filename,
+            reference_date=ref_date,
+        )
         auto_reject_reasons = []
 
         # 검증 결과에서 반려(BLOCKED) 항목 수집
@@ -598,6 +614,7 @@ def main() -> None:
         license_doc = next((d for d in documents if d.document_type == DocumentType.BUSINESS_LICENSE), None)
         cand_ven = (target_doc.vendor_name.raw if target_doc and target_doc.vendor_name.raw else "") or (license_doc.vendor_name.raw if license_doc and license_doc.vendor_name.raw else "")
         def_ven = manual_ai.get("업체명") or cand_ven
+
         cand_biz = (target_doc.business_number.raw if target_doc and target_doc.business_number.raw else "") or (license_doc.business_number.raw if license_doc and license_doc.business_number.raw else "")
         def_biz = manual_ai.get("사업자번호") or cand_biz
         cand_rep = (target_doc.representative.raw if target_doc and target_doc.representative.raw else "") or (license_doc.representative.raw if license_doc and license_doc.representative.raw else "")
@@ -643,11 +660,34 @@ def main() -> None:
         with c_cp3: st.code(t_rep or "대표자 없음", language=None)
         with c_cp4: st.code(f"{t_contact or '담당자'} / {t_phn or '연락처'} / {t_eml or '이메일'}", language=None)
 
-        # 추천 폴더명 자동 생성
+        # 추천 폴더명 자동 생성 (수의계약 및 온라인스토어 태그 반영)
         now = datetime.date.today()
         t_dept = base_data.get("pi_dept", "학과")
         t_pi = base_data.get("pi_name", "연구책임자")
-        fold_nm = f"({now.strftime('%Y.%m.%d')}) {t_dept} {t_pi} - {t_ven}"
+
+        is_sui = (con_type == "수의계약") or any("수의계약" in (d.raw_text or "") or "업체선정확인서" in (d.raw_text or "") for d in documents)
+        is_online = (
+            any(d.document_type == DocumentType.ONLINE_STORE_CART for d in documents)
+            or any(kw in (d.raw_text or "").lower() for d in documents for kw in ["삼성닷컴", "samsung.com", "apple.com", "장바구니", "온라인스토어", "공식스토어"])
+            or any(kw in (t_ven or "").lower() for kw in ["온라인스토어", "공식스토어"])
+        )
+
+        tag_part = ""
+        if is_sui and is_online:
+            tag_part = " (수의계약, 온라인스토어)"
+        elif is_sui:
+            tag_part = " (수의계약)"
+        elif is_online:
+            tag_part = " (온라인스토어)"
+
+        fold_ven = t_ven
+        if is_online:
+            if any(k in fold_ven.lower() for k in ["samsung", "삼성"]) and "온라인스토어" not in fold_ven:
+                fold_ven = "삼성온라인스토어"
+            elif any(k in fold_ven.lower() for k in ["apple", "애플"]) and "온라인스토어" not in fold_ven:
+                fold_ven = "애플온라인스토어"
+
+        fold_nm = f"({now.strftime('%Y.%m.%d')}){tag_part} {t_dept} {t_pi} - {fold_ven}"
         st.caption("📁 **추천 폴더명 (바탕화면 서류 보관용)**")
         st.code(fold_nm, language="text")
 

@@ -1,5 +1,5 @@
 from purchase_verifier.core import (
-    DocumentType, VerificationStatus, extract_document, find_lowest_quote,
+    DocumentType, VerificationStatus, classify_document, extract_document, find_lowest_quote,
     is_valid_business_number, normalize_business_number, verify_documents,
 )
 
@@ -753,6 +753,151 @@ def test_daeyeong_rental_quote_extraction():
     assert doc.vat.value == 156_000
 
 
+def test_date_not_misidentified_as_total_amount():
+    text = (
+        "견 적 서\n"
+        "세종대학교 산학협력단 귀중 690-04-00723\n"
+        "씨티엘(CTL)\n"
+        "견적일자 공급가액 세액 합계금액 (VAT 포함)\n"
+        "2026.08.31 ₩ 14,000,000 ₩ 1,400,000 ₩ 15,400,000\n"
+        "합 계 ₩ 14,000,000\n"
+        "부가세 ₩ 1,400,000\n"
+        "전 체 합 계 ₩ 15,400,000\n"
+    )
+    doc = extract_document(text, "ctl.pdf", use_vendor_cache=False)
+    assert doc.total.value == 15_400_000
+    assert doc.subtotal.value == 14_000_000
+    assert doc.vat.value == 1_400_000
 
 
+def test_verify_documents_reference_date():
+    from datetime import date
+    from purchase_verifier.core import verify_documents, VerificationStatus, PurchaseDocument, DocumentType, Evidence, Amount
+
+    doc_quote = PurchaseDocument(
+        filename="quote.pdf",
+        document_type=DocumentType.QUOTE,
+        raw_text="",
+        vendor_name=Evidence(raw="테스트상사"),
+        business_number=Evidence(raw="123-45-67890"),
+        recipient=Evidence(raw="세종대학교 산학협력단"),
+        total=Amount(value=1000000),
+        quote_date=Evidence(raw="2026-08-01"),
+        expiry_date=Evidence(raw="2026-08-31"),
+    )
+    doc_biz = PurchaseDocument(
+        filename="biz.pdf",
+        document_type=DocumentType.BUSINESS_LICENSE,
+        raw_text="",
+        vendor_name=Evidence(raw="테스트상사"),
+        business_number=Evidence(raw="123-45-67890"),
+    )
+    doc_bank = PurchaseDocument(
+        filename="bank.pdf",
+        document_type=DocumentType.BANK_COPY,
+        raw_text="",
+        account_holder=Evidence(raw="테스트상사"),
+        account_number=Evidence(raw="123-456-789"),
+    )
+
+    # 1. Without reference_date (today is September 2026 -> expired)
+    results_today = verify_documents([doc_quote, doc_biz, doc_bank])
+    exp_check = next(r for r in results_today if r.name == "견적서 유효기간")
+    assert exp_check.status == VerificationStatus.BLOCKED
+
+    # 2. With reference_date (August 10, 2026 -> valid, > 5 business days remaining)
+    results_past = verify_documents([doc_quote, doc_biz, doc_bank], reference_date=date(2026, 8, 10))
+    exp_check_past = next(r for r in results_past if r.name == "견적서 유효기간")
+    assert exp_check_past.status == VerificationStatus.PASS
+
+
+def test_sole_proprietor_bank_requires_vendor_name():
+    from purchase_verifier.core import verify_documents, VerificationStatus, PurchaseDocument, DocumentType, Evidence, Amount
+
+    doc_quote = PurchaseDocument(
+        filename="quote.pdf",
+        document_type=DocumentType.QUOTE,
+        raw_text="",
+        vendor_name=Evidence(raw="새빔"),
+        representative=Evidence(raw="박해숙"),
+        business_number=Evidence(raw="276-36-01279"),
+        recipient=Evidence(raw="세종대학교 산학협력단"),
+        total=Amount(value=1000000),
+    )
+    # Bank copy with ONLY representative name (no vendor name)
+    doc_bank_rep_only = PurchaseDocument(
+        filename="bank.pdf",
+        document_type=DocumentType.BANK_COPY,
+        raw_text="기업자유예금",
+        account_holder=Evidence(raw="박해숙"),
+        account_number=Evidence(raw="636-033038-01-016"),
+    )
+    res1 = verify_documents([doc_quote, doc_bank_rep_only])
+    holder_check = next(r for r in res1 if r.name == "통장사본 예금주")
+    # Must be BLOCKED according to user requirement
+    assert holder_check.status == VerificationStatus.BLOCKED
+
+    # Bank copy with vendor name + rep name -> PASS
+    doc_bank_both = PurchaseDocument(
+        filename="bank.pdf",
+        document_type=DocumentType.BANK_COPY,
+        raw_text="기업자유예금",
+        account_holder=Evidence(raw="새빔(박해숙)"),
+        account_number=Evidence(raw="636-033038-01-016"),
+    )
+    res2 = verify_documents([doc_quote, doc_bank_both])
+    holder_check2 = next(r for r in res2 if r.name == "통장사본 예금주")
+    assert holder_check2.status == VerificationStatus.PASS
+
+
+def test_english_and_informal_quote_classification():
+    # 1. Proforma Invoice
+    proforma_text = "PROFORMA INVOICE\nNo: PI-2026-001\nDescription Qty Unit Price Amount\nSensor 2 $500 $1000\nTotal Amount: $1000"
+    assert classify_document(proforma_text, "invoice.pdf") == DocumentType.QUOTE
+
+    # 2. Quotation
+    quote_text = "QUOTATION\nCustomer: SJU IACF\nItem: GPU Server\nTotal: 15,000,000 KRW"
+    assert classify_document(quote_text, "quote.pdf") == DocumentType.QUOTE
+
+    # 3. 약식 단가표 (한글 견적서 라벨 없음)
+    table_text = "836-81-03763\nLeRobot SO-ARM 101\nTotal\nSet 2 671,000 1,220,000\n1,342,000"
+    assert classify_document(table_text, "item_list.pdf") == DocumentType.QUOTE
+
+
+def test_english_quote_recipient_iacf_is_pass():
+    # 1. Full English IACF
+    q1 = _full_quote("Acme Corp", 1_000_000, recipient="Sejong University Industry-Academic Cooperation Foundation")
+    res1 = verify_documents([q1], "물품")
+    rec1 = next(r for r in res1 if r.name == "수신자 산학협력단")
+    assert rec1.status == VerificationStatus.PASS
+
+    # 2. Short IACF acronym
+    q2 = _full_quote("Acme Corp", 1_000_000, recipient="Sejong Univ IACF")
+    res2 = verify_documents([q2], "물품")
+    rec2 = next(r for r in res2 if r.name == "수신자 산학협력단")
+    assert rec2.status == VerificationStatus.PASS
+
+    # 3. Lowercase with hyphen
+    q3 = _full_quote("Acme Corp", 1_000_000, recipient="sejong university industry-academic cooperation foundation")
+    res3 = verify_documents([q3], "물품")
+    rec3 = next(r for r in res3 if r.name == "수신자 산학협력단")
+    assert rec3.status == VerificationStatus.PASS
+
+
+def test_english_quote_recipient_sejong_univ_without_iacf_is_blocked():
+    # Sejong University (Main Campus) without IACF must be BLOCKED
+    q = _full_quote("Acme Corp", 1_000_000, recipient="Sejong University")
+    res = verify_documents([q], "물품")
+    rec = next(r for r in res if r.name == "수신자 산학협력단")
+    assert rec.status == VerificationStatus.BLOCKED
+    assert "독립 법인" in rec.detail
+    assert "IACF" in rec.detail
+
+
+def test_english_quote_other_institution_is_review():
+    # Other university / institution must be REVIEW
+    q = _full_quote("Acme Corp", 1_000_000, recipient="Stanford University")
+    res = verify_documents([q], "물품")
+    rec = next(r for r in res if r.name == "수신자 산학협력단")
+    assert rec.status == VerificationStatus.REVIEW
 

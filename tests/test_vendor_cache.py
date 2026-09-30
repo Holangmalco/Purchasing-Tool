@@ -202,3 +202,31 @@ def test_extract_document_fallback_with_vendor_cache(temp_db):
     assert doc2.business_number.raw == VALID_BIZ_NUM
     assert doc2.business_number.inferred is True
     assert "[거래처 마스터 DB 참조]" in doc2.business_number.evidence
+
+
+def test_find_matching_vendor_fuzzy(temp_db):
+    from purchase_verifier.vendor_cache import find_matching_vendor_fuzzy
+
+    save_vendor(
+        biz_num=VALID_BIZ_NUM,
+        vendor_name="주식회사 토마토파트너스",
+        representative="이기연",
+        db_path=temp_db,
+    )
+
+    # 1. Exact biz_num match
+    m1 = find_matching_vendor_fuzzy("다른상호", biz_num=VALID_BIZ_NUM, db_path=temp_db)
+    assert m1 is not None
+    assert m1[0]["business_number"] == VALID_BIZ_NUM
+    assert m1[1] == 1.0
+
+    # 2. Fuzzy match with OCR typo (토까토파프너스 -> 토마토파트너스)
+    m2 = find_matching_vendor_fuzzy("주식회사 토까토파프너스", db_path=temp_db)
+    assert m2 is not None
+    assert m2[0]["vendor_name"] == "주식회사 토마토파트너스"
+    assert m2[1] >= 0.70
+
+    # 3. Non-existent vendor returns None
+    m3 = find_matching_vendor_fuzzy("전혀다른업체", db_path=temp_db)
+    assert m3 is None
+

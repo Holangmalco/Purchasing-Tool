@@ -229,6 +229,24 @@ def is_valid_business_number(value: str) -> bool:
     return (10 - (total % 10)) % 10 == int(digits[9])
 
 
+def _is_iacf_text(text: str) -> bool:
+    """영문 산학협력단(IACF) 표기 여부 확인.
+    
+    규정: 영문 견적서의 경우 'industry-academic cooperation foundation' 또는
+    약자 'iacf'가 포함되어 있어야 정식 산학협력단 수신자로 인정.
+    """
+    if not text:
+        return False
+    t = text.lower()
+    # 1. industry-academic cooperation foundation 및 변형 (하이픈, 띄어쓰기 유연 매칭)
+    if re.search(r"industry[- ]?(?:academic|academia|university)\s+cooperation\s+foundation", t):
+        return True
+    # 2. 약자 iacf (단독 단어 매칭)
+    if re.search(r"\b(?:sju[-_ ]?)?iacf\b", t):
+        return True
+    return False
+
+
 def _evidence(raw: str, source: str, confidence: float, inferred: bool = False) -> Evidence:
     return Evidence(raw=raw, evidence=source, confidence=confidence, inferred=inferred)
 
@@ -238,7 +256,11 @@ def classify_document(text: str, filename: str = "") -> DocumentType:
     haystack_nospace = re.sub(r"\s+", "", haystack)
     scores = {kind: 0 for kind in DocumentType}
     keywords = {
-        DocumentType.QUOTE: ("견적", "quotation", "quote", "공급가액", "합계", "subtotal", "단가", "見積"),
+        DocumentType.QUOTE: (
+            "견적", "quotation", "quote", "공급가액", "합계", "subtotal", "단가", "見積",
+            "proforma invoice", "proforma", "price quote", "formal quotation", "cost estimate",
+            "total amount", "grand total", "unit price",
+        ),
         DocumentType.ONLINE_STORE_CART: (
             "장바구니총액", "장바구니", "apple.com/kr/shop/bag", "교육스토어홈", "applecare+", "apple(kr)",
             "결제예정금액", "삼성닷컴", "samsung.com", "주문상품", "멤버십포인트", "shoppingcart", "주문금액"
@@ -253,8 +275,11 @@ def classify_document(text: str, filename: str = "") -> DocumentType:
         DocumentType.BUSINESS_LICENSE: ("사업자등록증", "사면자들록"),
         DocumentType.BANK_COPY: ("통장사본", "통장", "보통예금"),
         DocumentType.CONSTRUCTION_CONFIRMATION: ("공사확인서", "시설공사", "장비설치확인서", "장비설치", "설치확인서"),
-        DocumentType.ONLINE_STORE_CART: ("장바구니총액", "장바구니-apple", "apple.com/kr/shop/bag", "결제예정금액", "삼성닷컴", "교육스토어홈"),
-        DocumentType.QUOTE: ("견적서", "견적", "quotation", "見積書", "見積"),
+        DocumentType.ONLINE_STORE_CART: ("장바구니총액", "장바구니-apple", "apple.com/kr/shop/bag", "결제예정금액", "삼성닷컴", "교육스토어홈", "applecare+"),
+        DocumentType.QUOTE: (
+            "견적서", "견적", "quotation", "quote", "proformainvoice", "proforma", "costestimate",
+            "pricequote", "priceproposal", "formalquotation", "estimate", "見積書", "見積",
+        ),
     }
     title_hits = {kind: any(re.sub(r"\s+", "", term) in haystack_nospace for term in terms) for kind, terms in explicit_titles.items()}
     # 장바구니 화면 강한 핑거프린트 감지
@@ -262,6 +287,14 @@ def classify_document(text: str, filename: str = "") -> DocumentType:
         title_hits[DocumentType.ONLINE_STORE_CART] = True
     if "결제예정금액" in haystack_nospace and any(k in haystack_nospace for k in ("삼성", "samsung", "주문상품", "멤버십")):
         title_hits[DocumentType.ONLINE_STORE_CART] = True
+    if "applecare+" in haystack_nospace:
+        title_hits[DocumentType.ONLINE_STORE_CART] = True
+
+    # 영문/약식 견적서 핑거프린트 감지 (품목, 단가, 합계 표 구조 + 타 서류 키워드 부재)
+    has_quote_terms = any(k in haystack_nospace for k in ("quotation", "quote", "proforma", "estimate", "단가", "공급가액", "견적"))
+    has_table_terms = any(k in haystack_nospace for k in ("total", "subtotal", "합계", "총액", "총계")) and any(k in haystack_nospace for k in ("unitprice", "qty", "set", "ea", "수량", "단가", "금액", "부가세", "vat"))
+    if (has_quote_terms or has_table_terms) and not any(k in haystack_nospace for k in ("사업자등록증", "세무서", "일반과세자", "통장사본", "예금주", "보통예금", "공사확인서", "applecare+", "장바구니", "apple.com", "삼성닷컴", "samsung.com")):
+        scores[DocumentType.QUOTE] += 3
 
     if sum(title_hits.values()) == 1:
         for kind, hit in title_hits.items():
@@ -371,6 +404,12 @@ def _amount_after_label(
         line_after = text[match.end():end_of_line] if end_of_line != -1 else text[match.end():]
         if exclude_keywords and any(k in line_after for k in exclude_keywords):
             continue
+        after_str = text[match.end():match.end() + 25]
+        if re.match(r"^[\s]*[./\-년]\s*\d{1,2}\s*[./\-월]?", after_str):
+            continue
+        if re.match(r"^[\s]*-[\s]*\d{2,4}[\s]*-", after_str):
+            continue
+
         raw = match.group(3)
         clean_digits = re.sub(r"[^\d]", "", raw)
         if clean_digits:
@@ -395,6 +434,14 @@ def _amount_after_label(
         mid_text = match.group(2)
         if exclude_keywords and any(k in mid_text for k in exclude_keywords):
             continue
+        after_str = text[match.end():match.end() + 20]
+        # 날짜 형식 (2026.08.31, 2026-08-31, 2026년 8월 등) 제외
+        if re.match(r"^[\s]*[./\-년]\s*\d{1,2}", after_str):
+            continue
+        # 사업자등록번호 또는 전화번호 형식 제외
+        if re.match(r"^[\s]*-[\s]*\d{2,4}", after_str):
+            continue
+
         raw = match.group(3)
         clean_digits = re.sub(r"[^\d]", "", raw)
         if clean_digits:
@@ -832,6 +879,8 @@ EXTRACTION_RULES = {
         "labels": (
             "수신자", "수신처", "수신", "귀하", "납품처", "발주처", "고객명", "고객사",
             "Messrs", "MESSRS", "Messrs.", "To", "TO", "to",
+            "Bill To", "BILL TO", "Ship To", "SHIP TO", "Invoice To", "INVOICE TO",
+            "Customer", "CUSTOMER", "Buyer", "BUYER", "Client", "CLIENT", "Attn", "ATTN",
         ),
     },
     "담당자": {
@@ -883,6 +932,7 @@ EXTRACTION_RULES = {
             "예정금액부가가치세포함", "예정금액부가세포함",
             "공사예정금액부가가치세포함", "공사예정금액부가세포함",
             "아래와 같이 견적합니다", "아래와같이 견적합니다", "아래와 같이 견적하나이다",
+            "전체합계", "전체 합계", "전 체 합 계", "총합계금액", "총 합계 금액",
             "견적금액(VAT포함)", "견적금액 (VAT포함)", "견적금액(부가세포함)", "견적금액 (부가세포함)",
             "견적금액", "견적 금액", "견적총액", "견적 총액",
         ),
@@ -1101,25 +1151,86 @@ def extract_document(
     if not document.representative.raw and extracted_rep_from_vendor:
         document.representative = _evidence(extracted_rep_from_vendor, f"상호 뒤 성명 분리: {raw_vendor.raw}", 0.78, inferred=True)
 
-    document.recipient = _labeled(text, EXTRACTION_RULES["수신자"]["labels"])
-    if document.recipient.raw:
-        cleaned_rec = re.sub(r"^(?:Messrs\.?|To\b\.?|To\b|업\s*체\s*명|처\s*상\s*호|수\s*신\s*처\s*상\s*호|상\s*호|수\s*신\s*자?|고\s*객\s*명|고\s*객\s*사)\s*[:：.]?\s*", "", document.recipient.raw, flags=re.I).strip(" .:,;|-")
-        cleaned_rec = re.split(r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)", cleaned_rec, flags=re.I)[0].strip(" .:,;|-")
-        if cleaned_rec:
-            document.recipient = _evidence(cleaned_rec, document.recipient.evidence, document.recipient.confidence)
+    # 수신자(Recipient) 추출: 2줄 분리 인쇄 및 인접 행(Window) 스캔 지원
+    lines = text.splitlines()
+    rec_line_idx = -1
+    raw_l1 = ""
+    evidence_line = ""
 
-    if not document.recipient.raw or not any(k in normalize_name(document.recipient.raw) for k in ("세종", "산단", "산학협력")):
+    # 1. 수신 라벨이 포함된 줄 인덱스 탐색
+    for idx, line in enumerate(lines):
+        if re.search(r"(?:수\s*신\s*자?|수\s*신\s*처|To\b|Messrs\.?|Bill\s*To\b|Invoice\s*To\b)[\s:：.-]", line, re.I):
+            rec_line_idx = idx
+            evidence_line = line
+            # 라벨 뒤 텍스트 분리
+            m = re.search(r"(?:수\s*신\s*자?|수\s*신\s*처|To\b|Messrs\.?|Bill\s*To\b|Invoice\s*To\b)[\s:：.-]*([^\n]{1,60})", line, re.I)
+            if m:
+                raw_l1 = m.group(1).strip()
+            break
+
+    # 1-1. 라벨 탐색 실패 시 _labeled fallback
+    if not raw_l1:
+        labeled_r = _labeled(text, EXTRACTION_RULES["수신자"]["labels"])
+        if labeled_r.raw:
+            raw_l1 = labeled_r.raw
+            evidence_line = labeled_r.evidence
+
+    if raw_l1:
+        cleaned_rec = re.sub(
+            r"^(?:Messrs\.?|To\b\.?|To\b|Bill\s*To\b|Ship\s*To\b|Invoice\s*To\b|Customer\b|Buyer\b|Client\b|Attn\b|업\s*체\s*명|처\s*상\s*호|수\s*신\s*처\s*상\s*호|상\s*호\s*명|상\s*호|수\s*신\s*자?|고\s*객\s*명|고\s*객\s*사|회\s*사\s*명)\s*[:：.]?\s*",
+            "",
+            raw_l1,
+            flags=re.I,
+        ).strip(" .:,;|-")
+        cleaned_rec = re.split(
+            r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
+            cleaned_rec,
+            flags=re.I,
+        )[0].strip(" .:,;|-")
+
+        # 2. 인접 윈도우 스캔 (2줄 분리 인쇄 병합: 공급자가 좌측이든 우측이든 산학협력단이 포함된 인접 행 탐색)
+        if rec_line_idx != -1 and not any(k in normalize_name(cleaned_rec) for k in ("산단", "산학협력")) and not _is_iacf_text(cleaned_rec):
+            for next_idx in range(rec_line_idx + 1, min(rec_line_idx + 3, len(lines))):
+                l_next = lines[next_idx]
+                m_san = re.search(r"(산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?|산[\s/·\-]*단|\biacf\b|industry[- ]?academic[^\n]*)", l_next, re.I)
+                if m_san:
+                    sub_part = m_san.group(1).strip(" .:,;|-")
+                    sub_part = re.split(r"(?:공\s*급\s*자|\s+상\s*호|등\s*록|사\s*업\s*자|주\s*소|전\s*화|TEL|일\s*자)", sub_part)[0].strip(" .:,;|-")
+                    sub_part = re.sub(r"\s*귀\s*[하중]", "", sub_part).strip(" .:,;|-")
+                    sub_part = re.sub(r"산[\s/·\-]*학[\s/·\-]*협[\s/·\-]*[력려련]?[\s/·\-]*단?", "산학협력단", sub_part)
+                    sub_part = re.sub(r"산[\s/·\-]*단", "산단", sub_part)
+                    if sub_part:
+                        cleaned_rec = f"{cleaned_rec} {sub_part}".strip()
+                        evidence_line = f"{evidence_line} / {l_next.strip()}"
+                        break
+
+        if cleaned_rec:
+            document.recipient = _evidence(cleaned_rec, evidence_line, 0.88, inferred=True)
+
+    # 3. 본문 전체 fallback 탐색 (수신처 라벨이 없는 경우 또는 수신처에 산단이 누락된 경우)
+    has_full_sanhan = False
+    if document.recipient.raw:
+        r_norm = normalize_name(document.recipient.raw)
+        if ("산학협력" in r_norm or "산단" in r_norm) and ("세종" in r_norm or "sju" in r_norm):
+            has_full_sanhan = True
+        elif _is_iacf_text(document.recipient.raw):
+            has_full_sanhan = True
+
+    if not has_full_sanhan:
         candidate_lines = []
-        for line in text.splitlines():
+        for line in lines:
             line_clean = re.sub(r"^[▪▶•\-\*\s]+", "", _clean_spaces(line)).strip()
             norm = normalize_name(line_clean)
-            if ("세종" in norm or "산단" in norm or "산학협력" in norm) and not any(k in norm for k in ("공급자", "시공사", "발행처", "세무서", "견적서", "대관", "컨벤션센터", "운영관리")):
+            line_lower = line_clean.lower()
+            is_ko_hit = ("세종" in norm or "산단" in norm or "산학협력" in norm) and not any(k in norm for k in ("공급자", "시공사", "발행처", "세무서", "견적서", "대관", "컨벤션센터", "운영관리"))
+            is_en_hit = (_is_iacf_text(line_lower) or ("sejong" in line_lower and ("univ" in line_lower or "iacf" in line_lower))) and not any(k in line_lower for k in ("vendor", "supplier", "issuer", "quotation", "quote"))
+            if is_ko_hit or is_en_hit:
                 candidate_lines.append(line_clean)
         
-        # '산학협력단' 또는 '산단'이 포함된 라인 우선 선택
         chosen_line = None
         for cl in candidate_lines:
-            if "산학협력" in normalize_name(cl) or "산단" in normalize_name(cl):
+            cl_norm = normalize_name(cl)
+            if "산학협력" in cl_norm or "산단" in cl_norm or _is_iacf_text(cl):
                 chosen_line = cl
                 break
         if not chosen_line and candidate_lines:
@@ -1127,10 +1238,22 @@ def extract_document(
 
         if chosen_line:
             cleaned_rec = re.sub(r"^[▪▶•\-\*\s]+", "", chosen_line)
-            cleaned_rec = re.sub(r"^(?:Messrs\.?|To\b\.?|To\b|업\s*체\s*명|처\s*상\s*호|수\s*신\s*처\s*상\s*호|상\s*호\s*명|상\s*호|수\s*신\s*자?|고\s*객\s*명|고\s*객\s*사|회\s*사\s*명)\s*[:：.]?\s*", "", cleaned_rec, flags=re.I).strip(" .:,;|-")
-            cleaned_rec = re.split(r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)", cleaned_rec, flags=re.I)[0].strip(" .:,;|-")
+            cleaned_rec = re.sub(
+                r"^(?:Messrs\.?|To\b\.?|To\b|Bill\s*To\b|Ship\s*To\b|Invoice\s*To\b|Customer\b|Buyer\b|Client\b|Attn\b|업\s*체\s*명|처\s*상\s*호|수\s*신\s*처\s*상\s*호|상\s*호\s*명|상\s*호|수\s*신\s*자?|고\s*객\s*명|고\s*객\s*사|회\s*사\s*명)\s*[:：.]?\s*",
+                "",
+                cleaned_rec,
+                flags=re.I,
+            ).strip(" .:,;|-")
+            cleaned_rec = re.split(
+                r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
+                cleaned_rec,
+                flags=re.I,
+            )[0].strip(" .:,;|-")
             if cleaned_rec:
-                document.recipient = _evidence(cleaned_rec, chosen_line, 0.85, inferred=True)
+                if document.recipient.raw and any(k in normalize_name(document.recipient.raw) for k in ("세종", "sejong")) and not any(k in normalize_name(document.recipient.raw) for k in ("산단", "산학협력")):
+                    document.recipient = _evidence(f"{document.recipient.raw} {cleaned_rec}".strip(), f"{document.recipient.evidence} + {chosen_line}", 0.88, inferred=True)
+                else:
+                    document.recipient = _evidence(cleaned_rec, chosen_line, 0.85, inferred=True)
 
     document.contact_person = _labeled(
         text,
@@ -1640,6 +1763,25 @@ def _compare_field(
         return CheckResult(label, VerificationStatus.CONFLICT, f"{label} 불일치: 기준 견적='{expected}', {doc_name}='{actual}'.", expected, actual)
 
     # TEXT_REVIEW 정책 (상호, 대표자명 등 텍스트 전용)
+    # 마스터 DB 연동 매칭 검사 (견적서와 서류가 동일한 등록 마스터 업체로 매칭되는 경우)
+    if "업체명" in label or "상호" in label:
+        try:
+            from purchase_verifier.vendor_cache import find_matching_vendor_fuzzy
+            m1 = find_matching_vendor_fuzzy(expected)
+            m2 = find_matching_vendor_fuzzy(actual)
+            if m1 and m2 and m1[0]["business_number"] == m2[0]["business_number"]:
+                canonical = m1[0]["vendor_name"]
+                return CheckResult(
+                    label,
+                    VerificationStatus.PASS,
+                    f"마스터 DB 등록 업체 일치 확인 (정규 상호: '{canonical}', {m1[2]} / {m2[2]})\n"
+                    f"실제 OCR 결과값: [기준 견적] '{expected}' / [{doc_name}] '{actual}'",
+                    expected,
+                    actual,
+                )
+        except Exception:
+            pass
+
     is_subset = (norm_expected in norm_actual) or (norm_actual in norm_expected)
     similarity = difflib.SequenceMatcher(None, norm_expected, norm_actual).ratio()
     
@@ -1656,6 +1798,7 @@ def verify_documents(
     documents: list[PurchaseDocument],
     purchase_type: str = "물품",
     selected_filename: Optional[str] = None,
+    reference_date: Optional[date] = None,
 ) -> list[CheckResult]:
     results = compare_documents(documents)
     license_doc = next((d for d in documents if d.document_type == DocumentType.BUSINESS_LICENSE), None)
@@ -1715,14 +1858,34 @@ def verify_documents(
         warning_recs = []
         for q in standard_quotes:
             q_rec = _value(q.recipient)
+            norm_q = normalize_name(q_rec) if q_rec else ""
+            raw_text = q.raw_text or ""
+            rec_lower = q_rec.lower() if q_rec else ""
+
+            # 1) 한글 산학협력단 / 산단 체크 (수신처 라벨 또는 문서 내 명시)
+            has_ko_iacf = (
+                "산학협력단" in norm_q
+                or "산단" in norm_q
+                or bool(re.search(r"산\s*학\s*협\s*[력려련]\s*단?", norm_q))
+                or ("세종" in raw_text and ("산학협력단" in raw_text or "산단" in raw_text))
+            )
+
+            # 2) 영문 IACF / Industry-Academic Cooperation Foundation 체크 (사용자 지침: 약자 iacf 포함 필수)
+            has_en_iacf = _is_iacf_text(rec_lower) or _is_iacf_text(raw_text)
+
+            if has_ko_iacf or has_en_iacf:
+                continue
+
             if not q_rec:
                 warning_recs.append(f"'{q.filename}': 수신자 미기재")
                 continue
-            norm_q = normalize_name(q_rec)
-            if "산학협력단" in norm_q or "산단" in norm_q or bool(re.search(r"산\s*학\s*협\s*[력려련]\s*단?", norm_q)):
-                continue
-            elif "세종" in norm_q or "세종대" in norm_q:
-                blocked_recs.append(f"'{q.filename}': 세종대학교(본교) 명의 ('{q_rec}')")
+
+            # 세종대학교(본교) 명의로만 발행된 경우 (산학협력단/IACF 누락) -> BLOCKED
+            is_ko_univ = "세종" in norm_q or "세종대" in norm_q
+            is_en_univ = ("sejong" in rec_lower or "sju" in rec_lower) and not has_en_iacf
+
+            if is_ko_univ or is_en_univ:
+                blocked_recs.append(f"'{q.filename}': 세종대학교(본교) 명의 - 산학협력단(IACF) 누락 ('{q_rec}')")
             else:
                 warning_recs.append(f"'{q.filename}': 산단 외 수신자 ('{q_rec}')")
 
@@ -1730,7 +1893,7 @@ def verify_documents(
             results.append(CheckResult(
                 "수신자 산학협력단",
                 VerificationStatus.BLOCKED,
-                f"반려 대상: 독립 법인인 세종대학교(본교) 명의로만 발행된 견적서가 있습니다. ('세종대학교 산학협력단'으로 재발행 필요)\n- " + "\n- ".join(blocked_recs),
+                f"반려 대상: 독립 법인인 세종대학교(본교) 명의로만 발행된 견적서가 있습니다. ('세종대학교 산학협력단' 또는 'IACF'로 재발행 필요)\n- " + "\n- ".join(blocked_recs),
                 "세종대학교 산학협력단",
                 ", ".join(blocked_recs),
             ))
@@ -1738,7 +1901,7 @@ def verify_documents(
             results.append(CheckResult(
                 "수신자 산학협력단",
                 VerificationStatus.REVIEW,
-                f"확인 필요: '산학협력단' 명의가 누락되었거나 불명확한 견적서가 있습니다.\n- " + "\n- ".join(warning_recs),
+                f"확인 필요: '산학협력단' 명의가 누락되었거나 불명확한 견적서가 있습니다. (영문 견적서의 경우 'IACF' 또는 'Industry-Academic Cooperation Foundation' 표기 필수)\n- " + "\n- ".join(warning_recs),
                 "세종대학교 산학협력단",
                 ", ".join(warning_recs),
             ))
@@ -1794,13 +1957,14 @@ def verify_documents(
             if target.expiry_date and target.expiry_date.raw:
                 exp_date = _parse_date(target.expiry_date.raw)
                 if exp_date:
-                    today = date.today()
-                    b_days = calculate_business_days(today, exp_date)
+                    check_base = reference_date or date.today()
+                    b_days = calculate_business_days(check_base, exp_date)
+                    base_label = f" (기준일: {check_base.strftime('%Y-%m-%d')})" if reference_date else ""
                     if b_days >= 5:
                         results.append(CheckResult(
                             "견적서 유효기간",
                             VerificationStatus.PASS,
-                            f"유효기간 정상 확인 (만료일: {target.expiry_date.raw}, 잔여 {b_days}영업일)",
+                            f"유효기간 정상 확인 (만료일: {target.expiry_date.raw}, 잔여 {b_days}영업일{base_label})",
                             "5영업일 이상 잔여",
                             f"{b_days}영업일 잔여",
                         ))
@@ -1808,7 +1972,7 @@ def verify_documents(
                         results.append(CheckResult(
                             "견적서 유효기간",
                             VerificationStatus.BLOCKED,
-                            f"반려 대상: 견적서 유효기간이 5영업일 미만 남았습니다! (만료일: {target.expiry_date.raw}, 잔여 {b_days}영업일)",
+                            f"반려 대상: 견적서 유효기간이 5영업일 미만 남았습니다! (만료일: {target.expiry_date.raw}, 잔여 {b_days}영업일{base_label})",
                             "5영업일 이상 잔여",
                             f"{b_days}영업일 잔여",
                         ))
@@ -1816,7 +1980,7 @@ def verify_documents(
                         results.append(CheckResult(
                             "견적서 유효기간",
                             VerificationStatus.BLOCKED,
-                            f"반려 대상: 견적서 유효기간이 이미 지났습니다! (만료일: {target.expiry_date.raw}, {abs(b_days)}영업일 경과)",
+                            f"반려 대상: 견적서 유효기간이 이미 지났습니다! (만료일: {target.expiry_date.raw}, {abs(b_days)}영업일 경과{base_label})",
                             "5영업일 이상 잔여",
                             f"{abs(b_days)}영업일 지남",
                         ))
@@ -1913,20 +2077,21 @@ def verify_documents(
                         rep_matched = _is_korean_name_match(clean_rep, holder_raw)
                         vendor_matched = _is_korean_name_match(target_vendor, holder_raw)
                         
-                        if is_corp_bankbook and (rep_matched or vendor_matched):
+                        if is_corp_bankbook and vendor_matched:
                             holder_check = CheckResult(
                                 "통장사본 예금주",
                                 VerificationStatus.PASS,
-                                f"개인사업자 기업통장(기업자유예금) 계좌 확인 (예금주: '{holder_raw}', 대표자: '{clean_rep}')",
-                                clean_rep,
+                                f"개인사업자 기업통장(기업자유예금) 계좌 확인 (예금주: '{holder_raw}', 상호: '{target_vendor}')",
+                                target_vendor,
                                 holder_raw,
                             )
                             break
-                        elif not is_corp_bankbook and rep_matched:
+                        elif rep_matched and not vendor_matched:
                             holder_check = CheckResult(
                                 "통장사본 예금주", 
                                 VerificationStatus.BLOCKED,
                                 f"반려 대상: 상호명이 누락되고 대표자 단독 명의('{clean_rep}')로만 기재된 개인 통장입니다.\n"
+                                f"규정상 개인사업자 통장은 업체명 단독 또는 업체명+대표자 병기 형태여야만 승인됩니다.\n"
                                 f"실제 OCR 결과: [견적서 상호] {_value(target.vendor_name)} / [통장사본 예금주] {_value(bank_doc.account_holder)}",
                                 _value(target.vendor_name),
                                 _value(bank_doc.account_holder)

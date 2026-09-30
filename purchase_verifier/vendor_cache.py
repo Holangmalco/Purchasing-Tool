@@ -289,3 +289,57 @@ def auto_cache_verified_documents(documents: list[Any], db_path: Optional[str] =
                 "account_number": target_acc_num,
             }
     return None
+
+
+def find_matching_vendor_fuzzy(
+    vendor_name: str,
+    biz_num: str = "",
+    min_similarity: float = 0.65,
+    db_path: Optional[str] = None,
+) -> Optional[tuple[dict[str, Any], float, str]]:
+    """Finds matching vendor in master DB using business number or fuzzy name matching."""
+    import difflib
+
+    clean_bn = normalize_biz_num(biz_num) if biz_num else ""
+    # 1. 사업자번호가 정확히 일치하는 경우 (최우선 확정)
+    if clean_bn and len(clean_bn) == 12:
+        vendor = get_vendor_by_biz_num(clean_bn, db_path)
+        if vendor:
+            return vendor, 1.0, "사업자등록번호 일치"
+
+    # 2. 상호명 유사도 매칭
+    clean_target = re.sub(r"\(주\)|\(유\)|주식회사|유한회사|\s+|㈜|\[주\]", "", str(vendor_name)).lower()
+    if not clean_target or len(clean_target) < 2:
+        return None
+
+    all_vendors = get_all_vendors(db_path)
+    best_match = None
+    best_sim = 0.0
+    best_reason = ""
+
+    for v in all_vendors:
+        canon_name = re.sub(r"\(주\)|\(유\)|주식회사|유한회사|\s+|㈜|\[주\]", "", v["vendor_name"]).lower()
+        if canon_name == clean_target:
+            return v, 1.0, "상호명 완전 일치"
+
+        sim = difflib.SequenceMatcher(None, clean_target, canon_name).ratio()
+        if sim > best_sim:
+            best_sim = sim
+            best_match = v
+            best_reason = f"정규 상호 유사도 {sim*100:.1f}%"
+
+        for alias in v.get("aliases", []):
+            canon_alias = re.sub(r"\(주\)|\(유\)|주식회사|유한회사|\s+|㈜|\[주\]", "", alias).lower()
+            if canon_alias == clean_target:
+                return v, 1.0, "별칭 상호 완전 일치"
+            a_sim = difflib.SequenceMatcher(None, clean_target, canon_alias).ratio()
+            if a_sim > best_sim:
+                best_sim = a_sim
+                best_match = v
+                best_reason = f"별칭 유사도 {a_sim*100:.1f}%"
+
+    if best_match and best_sim >= min_similarity:
+        return best_match, best_sim, best_reason
+
+    return None
+
