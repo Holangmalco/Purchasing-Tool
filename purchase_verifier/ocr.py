@@ -223,18 +223,34 @@ def extract_text_from_pdf_data(data: bytes) -> str:
                             parts.append(header_ocr)
                         if footer_ocr:
                             parts.append(footer_ocr)
+
+                        # 본문 영역(18%~80%)에 포함된 표/산출내역 이미지 보충 스캔
+                        p_h = float(getattr(page, "height", 1000) or 1000)
+                        has_body_image = False
+                        for p_img in getattr(page, "images", []):
+                            img_top = float(p_img.get("top", 0) or 0)
+                            img_h = float(p_img.get("height", 0) or 0)
+                            if (img_top > p_h * 0.15 and img_top < p_h * 0.85) or (img_h > p_h * 0.20):
+                                has_body_image = True
+                                break
+
+                        if has_body_image:
+                            body_ocr = ocr_image(img_cv[int(h * 0.18) : int(h * 0.80), :])
+                            if body_ocr:
+                                parts.append(body_ocr)
+
                         page_texts.append("\n".join(parts))
                         continue
                     except Exception as e:
-                        print(f"[Header/Footer OCR Warning] {e}")
+                        print(f"[Header/Footer/Body OCR Warning] {e}")
                         pass
                 page_texts.append(text)
             else:
-                # 스캔 이미지로 렌더링 후 OCR (scale=2.5 및 pypdfium2 우선 적용)
+                # 스캔 이미지로 렌더링 후 OCR (scale=2.0 및 pypdfium2 우선 적용)
                 try:
                     import pypdfium2 as pdfium
                     pdf_doc = pdfium.PdfDocument(io.BytesIO(data))
-                    p_img = pdf_doc[idx].render(scale=2.5).to_pil()
+                    p_img = pdf_doc[idx].render(scale=2.0).to_pil()
                     img_cv = cv2.cvtColor(np.array(p_img.convert("RGB")), cv2.COLOR_RGB2BGR)
                 except Exception as e:
                     print(f"[pypdfium2 Render Warning, falling back to pdfplumber] {e}")

@@ -1,5 +1,5 @@
 from purchase_verifier.core import (
-    DocumentType, VerificationStatus, classify_document, extract_document, find_lowest_quote,
+    DocumentType, VerificationStatus, classify_document, detect_ocr_anomaly, extract_document, find_lowest_quote,
     is_valid_business_number, normalize_business_number, verify_documents,
 )
 
@@ -901,4 +901,63 @@ def test_english_quote_other_institution_is_review():
     res = verify_documents([q], "물품")
     rec = next(r for r in res if r.name == "수신자 산학협력단")
     assert rec.status == VerificationStatus.REVIEW
+
+
+def test_verify_documents_ocr_anomaly_generates_review():
+    """OCR 결과에서 자모 분리나 텍스트 깨짐이 감지되면 verify_documents가 REVIEW 판정을 생성함을 검증."""
+    broken_text = "ㄱㅕㄴㅈㅓㄱㅅㅓ\nㅅㅏㅇㅎㅗ: ㅇㅏㅇㅣㅌㅣ\n1,000,000원\n" * 5
+    doc = extract_document(broken_text, "broken.pdf")
+    results = verify_documents([doc], "물품")
+    ocr_checks = [r for r in results if "OCR 품질" in r.name]
+    assert len(ocr_checks) >= 1
+    assert ocr_checks[0].status == VerificationStatus.REVIEW
+    assert "자모 분리" in ocr_checks[0].detail
+
+
+def test_clean_text_no_false_alarm_ocr_anomaly():
+    clean_text = "견적서\n세종대학교 산학협력단 귀중\n합계: 10,000,000원\n"
+    is_anom, msg = detect_ocr_anomaly(clean_text)
+    assert not is_anom
+    assert msg == ""
+
+
+def test_multi_representative_joint_license_matching():
+    lic_text = (
+        "사업자등록증\n"
+        "등록번호 120-81-86581\n"
+        "법인명 에스넷시스템(주)\n"
+        "대표자대표유형]이남작각자대표김형우각자대표]\n"
+    )
+    quote_text = (
+        "견적서\n"
+        "세종대학교 산학협력단 귀중 에스넷시스템㈜\n"
+        "사업자등록번호 : 120-81-86581\n"
+        "견적금액 : 21,978,000원 (VAT포함) 대표이사 김형우, 이남작 (印)\n"
+        "품명: GPU 서버 1대 21,978,000원\n"
+    )
+    lic_doc = extract_document(lic_text, "license.pdf")
+    q_doc = extract_document(quote_text, "quote.pdf")
+    assert "이남작" in lic_doc.representative.raw
+    assert "김형우" in lic_doc.representative.raw
+    assert "우각자" not in lic_doc.representative.raw
+    assert "김형우" in q_doc.representative.raw
+    assert "이남작" in q_doc.representative.raw
+
+    results = verify_documents([q_doc, lic_doc], "물품")
+    rep_result = next(r for r in results if r.name == "사업자등록증 대표자명")
+    assert rep_result.status == VerificationStatus.PASS
+
+
+def test_bank_copy_corp_account_holder_on_second_line():
+    bank_text = (
+        "주식회사 하나은행\n"
+        "에스닛시스템[주]\n"
+        "계좌번호 257-022239-00104\n"
+        "기업자유예금\n"
+    )
+    bank_doc = extract_document(bank_text, "bank.pdf")
+    assert bank_doc.account_holder.raw == "에스닛시스템(주)"
+    assert bank_doc.account_number.raw == "257-022239-00104"
+
+
 

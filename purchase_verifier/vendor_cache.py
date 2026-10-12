@@ -225,7 +225,14 @@ def delete_vendor(biz_num: str, db_path: Optional[str] = None) -> bool:
 
 def auto_cache_verified_documents(documents: list[Any], db_path: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Inspects verified purchasing documents and caches the vendor into master DB."""
-    from purchase_verifier.core import DocumentType, is_valid_business_number
+    from purchase_verifier.core import DocumentType, is_valid_business_number, verify_documents, VerificationStatus
+
+    quotes = [d for d in documents if getattr(d, "document_type", None) in (DocumentType.QUOTE, DocumentType.ONLINE_STORE_CART)]
+    license_doc = next((d for d in documents if getattr(d, "document_type", None) == DocumentType.BUSINESS_LICENSE), None)
+    if quotes and license_doc:
+        check_results = verify_documents(documents)
+        if any(r.status in (VerificationStatus.BLOCKED, VerificationStatus.CONFLICT) for r in check_results):
+            return None
 
     # 1. Look for business license or lowest quote with valid business number
     target_bn = ""
@@ -237,37 +244,37 @@ def auto_cache_verified_documents(documents: list[Any], db_path: Optional[str] =
     target_phone = ""
     target_email = ""
 
-    # Business License
-    for d in documents:
-        if d.document_type == DocumentType.BUSINESS_LICENSE:
-            if d.business_number.raw and is_valid_business_number(d.business_number.raw):
-                target_bn = d.business_number.raw
-            if d.vendor_name.raw:
-                target_vname = d.vendor_name.raw
-            if d.representative.raw:
-                target_rep = d.representative.raw
+    # Business License is the primary legal anchor for business number, vendor name, and representative
+    if license_doc:
+        if license_doc.business_number.raw and is_valid_business_number(license_doc.business_number.raw):
+            target_bn = license_doc.business_number.raw
+        if license_doc.vendor_name.raw:
+            target_vname = license_doc.vendor_name.raw
+        if license_doc.representative.raw:
+            target_rep = license_doc.representative.raw
+    elif quotes:
+        for q in quotes:
+            if not target_bn and q.business_number.raw and is_valid_business_number(q.business_number.raw):
+                target_bn = q.business_number.raw
+            if not target_vname and q.vendor_name.raw:
+                target_vname = q.vendor_name.raw
+            if not target_rep and q.representative.raw:
+                target_rep = q.representative.raw
 
     # Bank copy
     for d in documents:
-        if d.document_type == DocumentType.BANK_COPY:
+        if getattr(d, "document_type", None) == DocumentType.BANK_COPY:
             if d.account_number.raw:
                 target_acc_num = d.account_number.raw
             if d.account_holder.raw:
                 target_acc_holder = d.account_holder.raw
 
-    # Quote
-    for d in documents:
-        if d.document_type == DocumentType.QUOTE:
-            if not target_bn and d.business_number.raw and is_valid_business_number(d.business_number.raw):
-                target_bn = d.business_number.raw
-            if not target_vname and d.vendor_name.raw:
-                target_vname = d.vendor_name.raw
-            if not target_rep and d.representative.raw:
-                target_rep = d.representative.raw
-            if d.phone.raw and not target_phone:
-                target_phone = d.phone.raw
-            if d.email.raw and not target_email:
-                target_email = d.email.raw
+    # Complement contact info from quotes if available
+    for q in quotes:
+        if q.phone.raw and not target_phone:
+            target_phone = q.phone.raw
+        if q.email.raw and not target_email:
+            target_email = q.email.raw
 
     if target_bn and target_vname:
         ok = save_vendor(

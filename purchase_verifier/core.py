@@ -102,7 +102,9 @@ class LowestPriceResult:
 
 def detect_ocr_anomaly(text: str) -> tuple[bool, str]:
     """로컬 OCR 결과에서 자모 분리나 텍스트 깨짐, 어색한 단어 여부를 감지합니다."""
-    if not text or len(text.strip()) < 10:
+    if not text:
+        return False, ""
+    if len(text.strip()) < 10:
         return True, "추출된 텍스트가 너무 적거나 없습니다."
 
     if "[스캔 이미지" in text or "[OCR" in text or "미설치" in text:
@@ -117,8 +119,8 @@ def detect_ocr_anomaly(text: str) -> tuple[bool, str]:
         if jamo_ratio > 0.1:
             return True, f"한글 자모 분리 현상이 다수 발견되었습니다 (자모 비율 {jamo_ratio*100:.1f}%)."
 
-    # 2. 특수문자 깨짐 ( 등 유니코드 대체문자 또는 비정상 특수문자 연속)
-    if "" in text or len(re.findall(r"[^\w\s.,;:()/\-–—\[\]{}가-힣]", text)) > len(text) * 0.25:
+    # 2. 특수문자 깨짐 (\ufffd 등 유니코드 대체문자 또는 비정상 특수문자 과다)
+    if "\ufffd" in text or (len(text) > 0 and len(re.findall(r"[^\w\s.,;:()/\-–—\[\]{}가-힣]", text)) > len(text) * 0.25):
         return True, "특수문자 및 기호 깨짐 비율이 높습니다."
 
     return False, ""
@@ -172,14 +174,19 @@ def _clean_vendor_name(name: str) -> tuple[str, str]:
 
     parts = cleaned.split()
     if len(parts) == 2 and re.fullmatch(rf"{_KOREAN_SURNAMES}[가-힣]{{1,2}}", parts[1]):
-        if parts[0] not in ("성", "성명", "대표", "대", "표", "명", "대표자", "상호"):
+        if _is_vendor_name_candidate(parts[0]) and _is_representative_candidate(parts[1]):
             return parts[0], parts[1]
-        return "", parts[1]
+        elif _is_representative_candidate(parts[1]):
+            return "", parts[1]
     return cleaned, ""
 
 
 def _is_representative_candidate(name: str) -> bool:
     clean = _clean_spaces(name)
+    # 존칭(귀하, 귀중, 님, 교수님 등) 접미사 사전 정제
+    clean = re.sub(r"\s*(?:귀하|귀중|님|교수님|선생님|대표님)\s*$", "", clean).strip()
+    if not clean:
+        return False
     if re.fullmatch(r"\(?[^\w가-힣\u4e00-\u9fff]*\)?", clean) or re.fullmatch(r"\([^)]*\)", clean):
         return False
     if re.search(r"^[)\]}>'\"`.,·]", clean):
@@ -191,14 +198,32 @@ def _is_representative_candidate(name: str) -> bool:
         return False
     invalid_keywords = (
         "담당자", "휴대폰", "전화", "이메일", "사업장", "주소", "상호", "업태", "종목", "성명", "유형", "대표유형",
-        "회사", "회사명", "타워", "빌딩", "센터", "아파트", "오피스텔", "주식회사", "하이츠", "밸리"
+        "회사", "회사명", "타워", "빌딩", "센터", "아파트", "오피스텔", "주식회사", "하이츠", "밸리",
+        "세무서장", "세무서", "국세청", "국세청장", "산학협력단", "산학협력", "산단", "대학교", "세종대", "대학원",
+        "연구책임자", "연구원", "연구소", "공급받는자", "공급자", "수신자", "수신처", "발행자", "발행처",
+        "작성자", "청구자", "관리자", "소재지", "전자세금계산서", "과세자", "일반과세자", "간이과세자", "면세사업자",
+        "법인사업자", "공급가액", "합계금액", "부가세", "유효기간", "견적서", "사업자번호", "등록번호", "각자대표", "공동대표"
     )
     if any(k in clean for k in invalid_keywords):
         return False
     if clean in ("이사", "대표이사", "사장", "부장", "과장", "팀장", "상무", "전무", "대표", "대 표", "유형", "표자"):
         return False
+    if clean.endswith(("각자", "공동")):
+        return False
+    # 단독 행정구역/도로명 주소 패턴 배제 (예: 관평동, 역삼로, 테크노1로 등)
+    if re.search(r"^[(\[]?[가-힣]{1,6}(?:동|읍|면|리|구|시|군|로|길)[)\]]?$", clean):
+        return False
+
     digits_or_letters = re.sub(r"[^\w가-힣\u4e00-\u9fff]", "", clean)
-    return 1 < len(digits_or_letters) <= 12
+    if not (1 < len(digits_or_letters) <= 12):
+        return False
+
+    # 한글 전용 대표자명(2~4자)인 경우 성씨 유효성 검사 (외국인 영문명이나 한자/공동대표 슬래시 표기 제외)
+    if re.fullmatch(r"[가-힣]{2,4}", digits_or_letters):
+        if not re.match(rf"^{_KOREAN_SURNAMES}", digits_or_letters):
+            return False
+
+    return True
 
 
 def _is_contact_person_candidate(val: str) -> bool:
@@ -410,7 +435,9 @@ def _amount_after_label(
         line_after = text[match.end():end_of_line] if end_of_line != -1 else text[match.end():]
         if exclude_keywords and any(k in line_after for k in exclude_keywords):
             continue
-        after_str = text[match.end():match.end() + 25]
+        after_str = line_after[:25]
+        if re.match(r"^[\s]*(?:[./\-년/\s]\s*)?\d{1,2}\s*(?:[./\-월월일]|\b월\b|\b일\b)", after_str):
+            continue
         if re.match(r"^[\s]*[./\-년]\s*\d{1,2}\s*[./\-월]?", after_str):
             continue
         if re.match(r"^[\s]*-[\s]*\d{2,4}[\s]*-", after_str):
@@ -418,6 +445,10 @@ def _amount_after_label(
 
         raw = match.group(3)
         clean_digits = re.sub(r"[^\d]", "", raw)
+        # 4자리 숫자가 연도(1990~2040)이고 뒤에 월/일이 오는 경우 날짜이므로 금액에서 제외
+        if clean_digits and 1990 <= int(clean_digits) <= 2040:
+            if re.search(r"^\s*(?:[./\-년/\s]\s*)?\d{1,2}\s*월", after_str):
+                continue
         if clean_digits:
             matched_label = match.group(1)
             # 같은 행에 [공급가액, 부가세, 합계] 3개 숫자가 나란히 있는 행인지 검사 (예: 총 견적금액 9,700,000 970,000 10,670,000)
@@ -428,6 +459,10 @@ def _amount_after_label(
                     return Amount(line_amts[2], _evidence(f"{line_amts[2]:,}", line_full.strip(), 0.98), matched_label)
                 elif abs(line_amts[-3] + line_amts[-2] - line_amts[-1]) <= max(10, int(line_amts[-1] * 0.02)):
                     return Amount(line_amts[-1], _evidence(f"{line_amts[-1]:,}", line_full.strip(), 0.98), matched_label)
+            elif len(line_amts) == 2 and abs(line_amts[0] * 0.1 - line_amts[1]) <= max(10, int(line_amts[1] * 0.02)):
+                calc_sum = line_amts[0] + line_amts[1]
+                if f"{calc_sum:,}" in text or str(calc_sum) in text:
+                    return Amount(calc_sum, _evidence(f"{calc_sum:,}", f"{line_full.strip()} (VAT포함 합계: {calc_sum:,})", 0.98), matched_label)
 
             return Amount(int(clean_digits), _evidence(raw.strip(), match.group(0).strip(), 0.95), matched_label)
 
@@ -441,7 +476,9 @@ def _amount_after_label(
         if exclude_keywords and any(k in mid_text for k in exclude_keywords):
             continue
         after_str = text[match.end():match.end() + 20]
-        # 날짜 형식 (2026.08.31, 2026-08-31, 2026년 8월 등) 제외
+        # 날짜 형식 (2026.08.31, 2026-08-31, 2026년 8월, 2026 8월 등) 제외
+        if re.match(r"^[\s]*(?:[./\-년/\s]\s*)?\d{1,2}\s*(?:[./\-월월일]|\b월\b|\b일\b)", after_str):
+            continue
         if re.match(r"^[\s]*[./\-년]\s*\d{1,2}", after_str):
             continue
         # 사업자등록번호 또는 전화번호 형식 제외
@@ -450,6 +487,10 @@ def _amount_after_label(
 
         raw = match.group(3)
         clean_digits = re.sub(r"[^\d]", "", raw)
+        # 4자리 숫자가 연도(1990~2040)이고 뒤에 월/일이 오는 경우 날짜이므로 금액에서 제외
+        if clean_digits and 1990 <= int(clean_digits) <= 2040:
+            if re.search(r"^\s*(?:[./\-년/\s]\s*)?\d{1,2}\s*월", after_str):
+                continue
         if clean_digits:
             num_val = int(clean_digits)
             matched_label = match.group(1)
@@ -498,7 +539,7 @@ def calculate_expiry(text: str, quote_date: Evidence) -> Evidence:
     start = _parse_date(quote_date.raw)
     
     # 1. '유효기간은 9월 30일까지' 형태 (연도 생략형)
-    m_month_day = re.search(r"(?:유효기간|견적유효|만료일|유효\s*만료일)[^\d\n]{0,30}(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
+    m_month_day = re.search(r"(?:유\s*효\s*기\s*간|견\s*적\s*유\s*효(?:\s*기\s*간)?|만\s*료\s*일|유\s*효\s*만\s*료\s*일)[^\d\n]{0,30}(\d{1,2})\s*월\s*(\d{1,2})\s*일", text)
     if m_month_day and start:
         m_val = int(m_month_day.group(1))
         d_val = int(m_month_day.group(2))
@@ -511,7 +552,11 @@ def calculate_expiry(text: str, quote_date: Evidence) -> Evidence:
             pass
 
     # 2. '견적일로부터 15일', 'PERIOD OF VALIDY : 4주' 등 기간 표기
-    validity = re.search(r"(?:유효기간|견적유효기간|견적유효|견적일로부터|견적\s*후|발행일로부터|validity|validy|period\s*of\s*valid(?:ity|y))[^\d\n]{0,40}(\d{1,3})\s*(일|日|days?|주|weeks?|개월|months?)", text, re.IGNORECASE)
+    validity = re.search(
+        r"(?:유\s*효\s*기\s*간|견\s*적\s*유\s*효(?:\s*기\s*간)?|견\s*적\s*일\s*(?:로\s*)?부\s*터|견\s*적\s*후|발\s*행\s*일\s*(?:로\s*)?부\s*터|validity|validy|period\s*of\s*valid(?:ity|y))[^\d\n]{0,40}(\d{1,3})\s*(일|日|days?|주|weeks?|개월|months?)",
+        text,
+        re.IGNORECASE,
+    )
     if validity and start:
         num = int(validity.group(1))
         unit = validity.group(2).lower()
@@ -532,9 +577,19 @@ def _extract_items(text: str) -> list[Item]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
 
     header_idx = -1
+    table_keywords = ("단가", "공급가액", "공급가", "금액", "부가세", "단위", "수량", "금액(원)", "수량/단위", "unitprice", "qty")
     for idx, l in enumerate(lines):
         l_nospace = re.sub(r"\s+", "", l).lower()
-        if any(k in l_nospace for k in ("품명", "품목", "품명및사양", "description")) and any(k in l_nospace for k in ("수량", "단가", "금액", "공급가", "공급가액", "amount")):
+        has_prod_kw = any(k in l_nospace for k in ("품명", "품목", "품명및사양", "description", "item"))
+        has_val_kw = any(k in l_nospace for k in ("수량", "단가", "금액", "공급가", "공급가액", "amount", "total"))
+        if has_prod_kw and has_val_kw:
+            header_idx = idx
+            break
+        val_count = sum(1 for k in table_keywords if k in l_nospace)
+        if val_count >= 2 and any(k in l_nospace for k in ("번호", "no.", "no")):
+            header_idx = idx
+            break
+        if val_count >= 3:
             header_idx = idx
             break
 
@@ -545,14 +600,21 @@ def _extract_items(text: str) -> list[Item]:
         line_clean = _clean_spaces(line)
         line_clean = re.sub(r"(\d+)\s*,\s*(\d{3})", r"\1,\2", line_clean)
         line_clean = re.sub(r"\b(\d{1,2})\s+(0,\d{3}(?:,\d{3})*)\b", r"\1\2", line_clean)
-        line_clean = re.sub(r"\b(\d{1,2})\s+(\d{2},\d{3})\b", r"\1\2", line_clean)
+        line_clean = re.sub(r"\b(\d{1,2})\s+(\d{2},\d{3})\b(?!\s*,\s*\d{3})", r"\1\2", line_clean)
         if not line_clean or re.search(r"(품명|품목|description).*(수량|단가|금액)", line_clean, re.I):
             continue
         line_lower = line_clean.lower()
         line_nospace = re.sub(r"\s+", "", line_clean).lower()
+        # 1. 견적 합계/총액 행 도달 시 품목 추출 종료 (단, 이미 품목이 1개 이상 추출된 경우)
+        if items and re.search(r"^\s*(?:견\s*적\s*금\s*액\s*(?:계|\(VAT)?|합\s*계\s*금\s*액|공\s*급\s*가\s*액|공\s*급\s*금\s*액)\b", line_clean, re.I):
+            break
+        # 2. 제품 사양 또는 견적 비고 블록 도달 시 품목 추출 종료
+        if items and any(k in line_nospace for k in ("제품의상세사양", "제품상세사양", "견적참고사항")):
+            break
+
         if any(k in line_nospace for k in ("견적", "일자", "유효", "기간", "전화", "연락처", "팩스", "email", "이메일", "사업자", "등록번호", "대표", "주소", "소재지", "결제", "통장", "계좌", "담당", "특기사항", "특기", "비고", "참고사항", "주의사항")):
             continue
-        if re.search(r"^\s*(?:합\s*계|총\s*계|총\s*합\s*계|총\s*견적금액)\b", line_clean, re.I):
+        if re.search(r"^\s*(?:합\s*계(?:\s*금\s*액)?|총\s*계|총\s*합\s*계|총\s*견적금액|금\s*액|공\s*급\s*금\s*액|공\s*급\s*가\s*액)\b", line_clean, re.I):
             if items:
                 break
             continue
@@ -572,6 +634,8 @@ def _extract_items(text: str) -> list[Item]:
 
         num_matches = list(re.finditer(r"(?<!\d)\d+(?:,\d{3})*(?!\d)", line_clean))
         if not num_matches:
+            if re.match(r"^(?:[-–—•*·]+\.?|\d+[\.\)])", line_clean) or any(k in line_clean for k in ("상호", "사양", "규격", "조건", "유틸리티", "설치")):
+                continue
             if header_idx >= 0 and len(line_clean) <= 40 and not any(k in line_nospace for k in ("견적", "산학협력", "등록번호", "합계", "비고", "규격", "quotation", "sheet", "주식회사")):
                 if items and any(k in line_clean.lower() for k in ("wifi", "argb", "plus", "pro", "max", "edition", "정품", "케이블")):
                     items[-1] = Item(
@@ -652,20 +716,30 @@ def _extract_items(text: str) -> list[Item]:
                     name_cutoff = rem_matches[-1].start()
                     matched = True
             elif len(numbers) == 1 or (len(rem_numbers) >= 1 and rem_numbers[-1] > 100):
-                quantity = 1.0
-                unit_price = amount
-                name_cutoff = num_matches[-1].start()
-                matched = True
+                trailing = line_clean[num_matches[-1].end():].strip()
+                clean_trailing = re.sub(r"^(?:원(?:\s*정)?|vat\s*(?:포함|별도)?|부가세\s*(?:포함|별도)?|[(\[{]|\s*)+", "", trailing, flags=re.I).strip()
+                clean_letters = re.sub(r"[^\w가-힣]", "", clean_trailing)
+                if len(numbers) == 1 and len(clean_letters) >= 2:
+                    matched = False
+                else:
+                    quantity = 1.0
+                    unit_price = amount
+                    name_cutoff = num_matches[-1].start()
+                    matched = True
 
         if matched and amount is not None:
             raw_name = line_clean[:name_cutoff].strip()
             raw_name = re.sub(r"^\d+\s*(?:[\.\)\-]\s*|\s+)", "", raw_name).strip()
+            raw_name = re.sub(r"\s+\d+\s*(?:set|ea|대|개|식|box|pk|명|회|건)?$", "", raw_name, flags=re.I).strip()
+            raw_name = re.sub(r"\s+(?:set|ea|대|개|식|box|pk|명|회|건)\s*\d*$", "", raw_name, flags=re.I).strip()
             if pending_prefix:
                 full_name = f"{pending_prefix} {raw_name}".strip()
                 pending_prefix = ""
             else:
                 full_name = raw_name
             full_name = re.sub(r"^\d+\s*(?:[\.\)\-]\s*|\s+)", "", full_name).strip()
+            full_name = re.sub(r"\s+\d+\s*(?:set|ea|대|개|식|box|pk|명|회|건)?$", "", full_name, flags=re.I).strip()
+            full_name = re.sub(r"\s+(?:set|ea|대|개|식|box|pk|명|회|건)\s*\d*$", "", full_name, flags=re.I).strip()
             if full_name and len(full_name) >= 2:
                 items.append(Item(
                     name=full_name,
@@ -847,13 +921,34 @@ def _is_vendor_name_candidate(name: str) -> bool:
         "대표자", "대표", "납품", "수량", "금액", "단가", "합계", "소계", "부가세", "날짜",
         "ocr", "tesseract", "스캔", "이미지",
         "도매", "소매", "업태", "종목", "주소", "전화", "팩스", "이메일",
-        "비고", "품목", "모델명", "규격", "product", "remark", "description", "item", "qty", "quantity"
+        "비고", "품목", "모델명", "규격", "product", "remark", "description", "item", "qty", "quantity",
+        "세무서", "세무서장", "국세청", "지방국세청", "구청", "시청", "도청",
+        "보통예금", "기업자유예금", "당좌예금", "정기예금", "저축예금", "연구책임자"
     )
     if any(k in norm for k in excluded):
         return False
     clean = re.sub(r"[^\w가-힣]", "", name)
     if clean in ("주식회사", "유한회사", "합자회사", "합명회사", "사단법인", "재단법인"):
         return False
+
+    # 1. 단독 행정구역/동/면/리/로/길 패턴은 상호명 후보에서 원천 배제 (예: 관평동, 역삼동)
+    if re.search(r"^[(\[]?[가-힣]{1,6}(?:동|읍|면|리|구|시|군|로|길)[)\]]?$", name.strip()):
+        return False
+
+    # 2. 시/도 + 구/군/시/로/길 주소 패턴 배제 (예: 대전광역시 유성구 관평동, 서울특별시 강남구 테크노1로)
+    if re.search(r"(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)(?:특별|광역|자치)?(?:시|도)?\s+[가-힣0-9\s]+(?:구|군|시|읍|면|동|로|길)\b", name):
+        return False
+    if re.search(r"\b[가-힣]+(?:시|군|구)\s+[가-힣0-9]+(?:로|길|동|읍|면)\b", name):
+        return False
+
+    # 3. 단독 은행/금융기관 명칭 배제 (통장사본/견적서 은행 라인 오인식 방지, 주식회사 등 법인격 없는 단순 은행명)
+    if name.strip() in (
+        "국민은행", "기업은행", "신한은행", "우리은행", "하나은행", "농협", "농협은행",
+        "SC제일은행", "씨티은행", "카카오뱅크", "케이뱅크", "토스뱅크", "우체국", "새마을금고", "신협", "수협",
+        "보통예금", "자유예금", "당좌예금"
+    ):
+        return False
+
     return len(clean) >= 2
 
 
@@ -902,7 +997,7 @@ EXTRACTION_RULES = {
     },
     "통장사본": {
         "holder_labels": ("예금주", "예금주명", "예금주(성명/상호)"),
-        "account_labels": ("계좌번호", "계좌", "계변호", "입금안내", "입금은행", "입금처"),
+        "account_labels": ("계좌번호", "계좌", "계변호", "입금계좌", "입금안내", "입금처"),
         "account_pattern": r"[0-9\s*\-]{6,}",
     },
     "견적일자": {
@@ -972,10 +1067,28 @@ def extract_document(
     document = PurchaseDocument(filename=filename, document_type=kind, raw_text=text)
     if kind not in (DocumentType.QUOTE, DocumentType.BUSINESS_LICENSE, DocumentType.BANK_COPY, DocumentType.CONSTRUCTION_CONFIRMATION, DocumentType.ONLINE_STORE_CART):
         document.warnings.append("문서 유형을 확정하지 못했습니다. 원문을 검토하세요.")
+    if text:
+        is_anom, anom_msg = detect_ocr_anomaly(text)
+        if is_anom:
+            document.warnings.append(f"OCR 품질 경고 ({filename or '문서'}): {anom_msg}")
     own_prefix = re.sub(r"\D", "", my_business_prefix())
 
-    # 1. 라벨(등록번호, 사업자번호 등) 기반 번호 탐색
-    labeled_biz = _labeled(text, EXTRACTION_RULES["사업자번호"]["labels"], EXTRACTION_RULES["사업자번호"]["pattern"])
+    # 공급자(Supplier) 섹션 분리 (견적서 내 공급받는자/수신처와의 라벨 혼동 원천 방지)
+    supplier_text = text
+    if kind in (DocumentType.QUOTE, DocumentType.CONSTRUCTION_CONFIRMATION):
+        m_sup = re.search(r"(?:^|\n|[^\w가-힣])(?:공\s*급\s*자|공\s*급\s*처|발\s*행\s*처|Supplier|Vendor)(?=[^\w가-힣]|\n|$)", text, re.I)
+        if m_sup:
+            after_sup = text[m_sup.start():]
+            m_end_sup = re.search(r"\n\s*(?:공\s*급\s*받\s*는\s*자|수\s*신\s*자|수\s*신|귀\s*[하중]|아래와\s*같이|합\s*계|총\s*합\s*계|품\s*명\b|No\b)", after_sup)
+            if m_end_sup and m_end_sup.start() > 30:
+                supplier_text = after_sup[:m_end_sup.start()]
+            else:
+                supplier_text = after_sup
+
+    # 1. 라벨(등록번호, 사업자번호 등) 기반 번호 탐색 (공급자 블록 우선)
+    labeled_biz = _labeled(supplier_text, EXTRACTION_RULES["사업자번호"]["labels"], EXTRACTION_RULES["사업자번호"]["pattern"])
+    if not labeled_biz.raw and supplier_text != text:
+        labeled_biz = _labeled(text, EXTRACTION_RULES["사업자번호"]["labels"], EXTRACTION_RULES["사업자번호"]["pattern"])
     selected_biz = ""
     biz_evidence_str = ""
     is_valid_biz = False
@@ -990,7 +1103,7 @@ def extract_document(
 
     # 2. 라벨에서 번호를 못 찾았거나, 찾은 번호의 체크섬이 유효하지 않은 경우, 본문 전체에서 체크섬이 유효한 10자리 번호 우선 탐색
     if not selected_biz or not is_valid_biz:
-        for m in _BIZ_RE.finditer(text):
+        for m in _BIZ_RE.finditer(supplier_text if supplier_text != text else text):
             digits = re.sub(r"\D", "", m.group(1))
             if len(digits) == 10 and not digits.startswith(own_prefix):
                 normalized = normalize_business_number(digits)
@@ -999,6 +1112,16 @@ def extract_document(
                     biz_evidence_str = m.group(0)
                     is_valid_biz = True
                     break
+        if not selected_biz and supplier_text != text:
+            for m in _BIZ_RE.finditer(text):
+                digits = re.sub(r"\D", "", m.group(1))
+                if len(digits) == 10 and not digits.startswith(own_prefix):
+                    normalized = normalize_business_number(digits)
+                    if is_valid_business_number(normalized):
+                        selected_biz = normalized
+                        biz_evidence_str = m.group(0)
+                        is_valid_biz = True
+                        break
 
     if selected_biz:
         document.business_number = _evidence(selected_biz, biz_evidence_str, 0.9 if is_valid_biz else 0.55)
@@ -1011,9 +1134,14 @@ def extract_document(
     extracted_rep_from_vendor = ""
     if kind != DocumentType.BANK_COPY:
         raw_vendor = _labeled(
-            text,
+            supplier_text,
             EXTRACTION_RULES["상호명"]["labels"],
         )
+        if not raw_vendor.raw and supplier_text != text:
+            raw_vendor = _labeled(
+                text,
+                EXTRACTION_RULES["상호명"]["labels"],
+            )
         if raw_vendor.raw:
             cleaned_vendor, extracted_rep_from_vendor = _clean_vendor_name(raw_vendor.raw)
             if _is_vendor_name_candidate(cleaned_vendor):
@@ -1025,6 +1153,7 @@ def extract_document(
         if direct_sangho:
             cand = re.split(r"(?:대\s*표|성\s*명|사\s*업|업\s*태|종\s*목|주\s*소|등\s*록|전\s*화|팩\s*스|홈\s*페|H\s*P|E-?Mail|경\s*기\s*도|서\s*울|인\s*천|대\s*전|대\s*구|부\s*산|광\s*주)", direct_sangho.group(1))[0].strip()
             cand = re.sub(r"^명\s+", "", cand).strip()
+            cand = re.sub(r"^\[?단체명[\[:\]]?\s*", "", cand).strip()
             cand, _ = _clean_vendor_name(cand)
             if _is_vendor_name_candidate(cand):
                 document.vendor_name = _evidence(cand, direct_sangho.group(0).strip(), 0.88, inferred=True)
@@ -1116,38 +1245,84 @@ def extract_document(
             document.vendor_name = _evidence("경진솔루션", "kjsolution.com / KYUNGJIN 도메인 추론", 0.90, inferred=True)
 
     document.representative = _labeled(
-        text,
+        supplier_text,
         EXTRACTION_RULES["대표자"]["labels"],
         validator=_is_representative_candidate,
     )
+    if not document.representative.raw and supplier_text != text:
+        document.representative = _labeled(
+            text,
+            EXTRACTION_RULES["대표자"]["labels"],
+            validator=_is_representative_candidate,
+        )
     if not document.representative.raw:
         rep_direct = re.search(
             rf"(?:성\s*명|대\s*표\s*자|대\s*표(?!\s*유\s*형)|代\s*表|代表)[\s'’`.,·]*[:：.\-]?\s*({_KOREAN_SURNAMES}[가-힣]{{1,3}}|[가-힣\u4e00-\u9fff\s]{{2,6}})(?!\w)",
-            text,
+            supplier_text if supplier_text != text else text,
         )
+        if not rep_direct and supplier_text != text:
+            rep_direct = re.search(
+                rf"(?:성\s*명|대\s*표\s*자|대\s*표(?!\s*유\s*형)|代\s*表|代表)[\s'’`.,·]*[:：.\-]?\s*({_KOREAN_SURNAMES}[가-힣]{{1,3}}|[가-힣\u4e00-\u9fff\s]{{2,6}})(?!\w)",
+                text,
+            )
         if rep_direct:
             cand_rep = _clean_spaces(rep_direct.group(1)).strip()
             if _is_representative_candidate(cand_rep):
                 document.representative = _evidence(cand_rep, rep_direct.group(0).strip(), 0.88, inferred=True)
+    if kind == DocumentType.BUSINESS_LICENSE and not document.representative.raw:
+        # 사업자등록증 법인사업자 표준 서식: 대표자(대표유형) : 홍길동(각자대표), 김철수(각자대표)
+        # OCR 노이즈: 대표자대표유형]이남작각자대표김형우각자대표], 대표자 [대표유형] 등
+        lic_rep_m = re.search(
+            r"(?:대\s*표\s*자|성\s*명)\s*(?:[\(\[]\s*대\s*표\s*유\s*형\s*[\)\]]|대\s*표\s*유\s*형[\]\)]?)?[\s:：.-]*([^\n]{1,100})",
+            text,
+        )
+        if lic_rep_m:
+            val = lic_rep_m.group(1).strip()
+            val_clean = re.sub(r"[(\[]?\s*(?:각\s*자\s*대\s*표|공\s*동\s*대\s*표|대\s*표\s*유\s*형|대\s*표\s*이\s*사)\s*[)\]]?", " ", val)
+            val_clean = re.sub(r"[)\]}>'\"`.,·]", " ", val_clean)
+            cands = [p.strip() for p in re.split(r"[,/\s]+", val_clean) if p.strip()]
+            valid_reps = [c for c in cands if _is_representative_candidate(c) or re.match(rf"^{_KOREAN_SURNAMES}[가-힣]{{1,2}}$", c)]
+            if valid_reps:
+                rep_str = ", ".join(valid_reps)
+                document.representative = _evidence(rep_str, lic_rep_m.group(0).strip(), 0.95, inferred=True)
+
     if not document.representative.raw:
         rep_suffix = re.search(
             rf"({_KOREAN_SURNAMES}[가-힣]{{1,3}})\s*대\s*표(?!\w)",
-            text,
+            supplier_text if supplier_text != text else text,
         )
+        if not rep_suffix and supplier_text != text:
+            rep_suffix = re.search(
+                rf"({_KOREAN_SURNAMES}[가-힣]{{1,3}})\s*대\s*표(?!\w)",
+                text,
+            )
         if rep_suffix:
             cand_rep = rep_suffix.group(1).strip()
-            if _is_representative_candidate(cand_rep):
+            if not cand_rep.endswith(("각자", "공동")) and _is_representative_candidate(cand_rep):
                 document.representative = _evidence(cand_rep, rep_suffix.group(0).strip(), 0.88, inferred=True)
     if kind == DocumentType.BUSINESS_LICENSE and not document.representative.raw:
-        lic_rep = re.search(rf"(?:대\s*표\s*자|대\s*표(?!\s*유\s*형)|표\s*자|성\s*명)[- \s'’`.,·:이$*#@%^&!/\\~_]*\s*({_KOREAN_SURNAMES}[가-힣]{{1,2}})", text)
+        # 1. 정식 라벨: 대표자, 대표, 표자, 성명
+        lic_rep = re.search(rf"(?:대\s*표\s*자|대\s*표(?!\s*유\s*형)|표\s*자|성\s*명)[- \s'’`.,·:이$*#@%^&!/\\~_<]*\s*({_KOREAN_SURNAMES}[가-힣]{{1,2}})", text)
         if lic_rep:
             cand_r = lic_rep.group(1).strip()
             if _is_representative_candidate(cand_r):
-                document.representative = _evidence(cand_r, lic_rep.group(0).strip(), 0.85, inferred=True)
+                document.representative = _evidence(cand_r, lic_rep.group(0).strip(), 0.90, inferred=True)
+
+        # 2. 배분 정렬(넓은 자간) 사업자등록증: 상호/법인명 바로 다음 줄에서 '대·표'가 누락되고 줄 첫머리가 '자'로 시작되는 경우만 엄격 한정
+        # (담당자, 사업자, 수신자, 근로자 등 타 단어 끝 글자 '자' 오인식 원천 차단)
+        if not document.representative.raw:
+            lic_rep_narrow = re.search(
+                rf"(?:법\s*인\s*명|상\s*호)[^\n]*\n+\s*자\s*[- \s'’`.,·:이$*#@%^&!/\\~_<]*\s*({_KOREAN_SURNAMES}[가-힣]{{1,2}})",
+                text
+            )
+            if lic_rep_narrow:
+                cand_rn = lic_rep_narrow.group(1).strip()
+                if _is_representative_candidate(cand_rn):
+                    document.representative = _evidence(cand_rn, lic_rep_narrow.group(0).strip(), 0.85, inferred=True)
 
     if document.representative.raw:
         rep_clean = re.split(r"(?:생\s*년\s*월\s*일|주\s*민|개\s*업|사\s*업\s*장)", document.representative.raw)[0].strip()
-        rep_clean = re.sub(r"\s*\(?(?:인|직인|서명|직인생략|직인\s*생략)\)?$", "", rep_clean).strip()
+        rep_clean = re.sub(r"\s*\(?(?:인|직인|서명|직인생략|직인\s*생략|印|서명날인)\)?$", "", rep_clean).strip()
         if "/" in rep_clean:
             slash_r = [p.strip() for p in rep_clean.split("/") if p.strip()]
             if len(slash_r) >= 2 and _is_representative_candidate(slash_r[-1]):
@@ -1189,7 +1364,7 @@ def extract_document(
             flags=re.I,
         ).strip(" .:,;|-")
         cleaned_rec = re.split(
-            r"(?:Quotation\s*#?|Quote\s*#?|DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
+            r"(?:Quotation\s*#?|Quote\s*#?|DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|대\s*표\s*자\s*명|대\s*표\s*자|대\s*표(?!\w)|성\s*명|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
             cleaned_rec,
             flags=re.I,
         )[0].strip(" .:,;|-")
@@ -1265,7 +1440,7 @@ def extract_document(
                 flags=re.I,
             ).strip(" .:,;|-")
             cleaned_rec = re.split(
-                r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
+                r"(?:DATE\b|Date\b|귀\s*[하중]|貴\s*[中下]|\s+상\s*호|공\s*급|등\s*록\s*번\s*호|사\s*업\s*자|대\s*표\s*자\s*명|대\s*표\s*자|대\s*표(?!\w)|성\s*명|견\s*적\s*제\s*출\s*일|제\s*출\s*일|\d\s*\d\s*\d\s*-)",
                 cleaned_rec,
                 flags=re.I,
             )[0].strip(" .:,;|-")
@@ -1337,23 +1512,27 @@ def extract_document(
             cand_holder = re.sub(r"[\[【]", "(", cand_holder)
             cand_holder = re.sub(r"^[高도주기]+\s*", "(주) ", cand_holder)
             cand_holder = _clean_spaces(cand_holder).strip()
-            if not any(k in cand_holder for k in ("고객", "회원", "귀하", "은행", "통장")):
+            if not any(k in cand_holder for k in ("고객", "회원", "귀하", "은행", "통장", "예금", "과목", "지점", "여럼", "담당자")):
                 document.account_holder = _evidence(cand_holder, nim_match.group(0).strip(), 0.85, inferred=True)
         # 1-2. (주)상호 / [주]상호 / [주상호 패턴 직접 탐색
         if not document.account_holder.raw:
-            corp_holder = re.search(r"(?:^|\n)\s*((?:\(주\)|㈜|\[주\]|\[주|주\s*식\s*회\s*사)\s*[가-힣A-Za-z0-9]{2,15}|[가-힣A-Za-z0-9]{2,15}\s*(?:\(주\)|㈜|\[주\]))", text)
-            if corp_holder:
-                cand_ch = _clean_spaces(corp_holder.group(1)).strip()
+            for corp_match in re.finditer(
+                r"(?:^|\n)\s*((?:\(주\)|㈜|\[주\]|\[주|주\s*식\s*회\s*사)\s*[가-힣A-Za-z0-9]{2,15}|[가-힣A-Za-z0-9]{2,15}\s*(?:\(주\)|㈜|\[주\]|\[주))",
+                text,
+            ):
+                cand_ch = _clean_spaces(corp_match.group(1)).strip()
                 cand_ch = re.sub(r"^\[주\]?\s*", "(주)", cand_ch)
-                if not any(k in cand_ch for k in ("은행", "통장", "과목", "계좌", "신규", "예금")):
-                    document.account_holder = _evidence(cand_ch, corp_holder.group(0).strip(), 0.88, inferred=True)
+                cand_ch = re.sub(r"\s*\[주\]?$", "(주)", cand_ch)
+                if not any(k in cand_ch for k in ("은행", "통장", "과목", "계좌", "신규", "예금", "여럼", "Bank", "BANK")):
+                    document.account_holder = _evidence(cand_ch, corp_match.group(0).strip(), 0.88, inferred=True)
+                    break
         # 2. 통장 상단 첫 줄 또는 계좌번호/과목 앞의 상호/성명 탐색
         if not document.account_holder.raw:
             for line in text.splitlines()[:6]:
                 clean_l = _clean_spaces(line).strip()
                 if not clean_l or len(clean_l) < 2 or len(clean_l) > 25:
                     continue
-                if any(k in clean_l for k in ("은행", "통장", "과목", "계좌", "금융", "신규", "지점", "인감", "서명", "Bank", "BANK", "예금", "종류", "거래")):
+                if any(k in clean_l for k in ("은행", "통장", "과목", "계좌", "금융", "신규", "지점", "인감", "서명", "Bank", "BANK", "예금", "종류", "거래", "보통", "자유", "당좌", "저축", "적금", "청약", "여럼")):
                     continue
                 if not re.search(r"[\uac00-\ud7a3]", clean_l):
                     continue
@@ -1371,21 +1550,67 @@ def extract_document(
             cleaned_h += ")"
         if cleaned_h:
             document.account_holder = _evidence(cleaned_h, document.account_holder.evidence, document.account_holder.confidence)
-    document.account_number = _labeled(text, EXTRACTION_RULES["통장사본"]["account_labels"], EXTRACTION_RULES["통장사본"]["account_pattern"])
+    def _is_account_candidate(val: str) -> bool:
+        clean_len = len(re.sub(r"[^\d*]", "", val))
+        if clean_len < 8 or clean_len > 25:
+            return False
+        if any(k in val for k in ("품명", "수량", "단가", "공급가", "금액", "대표", "업태", "종목", "주소", "견적", "산학", "연락처", "전화")):
+            return False
+        # 일반 전화번호 형식(02-, 031-, 042-, 010- 등 전국 지역번호/휴대폰) 제외
+        if bool(re.match(r"^0\d{1,2}[- ]?\d{3,4}[- ]?\d{4}$", val)) or val.startswith(("02-", "010-", "070-", "050-", "080-", "031-", "032-", "033-", "041-", "042-", "043-", "044-", "051-", "052-", "053-", "054-", "055-", "061-", "062-", "063-", "064-")):
+            return False
+        # 사업자등록번호 형식(3-2-5) 제외
+        if bool(re.match(r"^\d{3}[- ]?\d{2}[- ]?\d{5}$", val)) or is_valid_business_number(val):
+            return False
+        # 주민/법인등록번호 형식(6-7) 제외
+        if bool(re.match(r"^\d{6}[- ]?\d{7}$", val)):
+            return False
+        # 날짜 형식 (2026-08-31, 2026.08.31 등) 제외
+        if bool(_DATE_RE.match(val)) or bool(re.match(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$", val)):
+            return False
+        if bool(re.search(r"\d{1,2}\s*월|\d{1,2}\s*일|\d{4}\s*년", val)):
+            return False
+        return True
+
+    document.account_number = _labeled(
+        text,
+        EXTRACTION_RULES["통장사본"]["account_labels"],
+        EXTRACTION_RULES["통장사본"]["account_pattern"],
+        validator=_is_account_candidate,
+    )
     if not document.account_number.raw:
-        acc_match = re.search(r"(?:계좌번호|계좌|계변호|입금계좌|입금안내|입금처)[^\d\n]{0,20}([0-9\-–—]{6,30})", text)
+        acc_match = re.search(r"(?:계좌번호|계좌\s*번호|입금계좌|계좌|계변호|입금안내|입금처)[^\d\n]{0,20}([0-9\-–—]{6,30})", text)
         if acc_match:
             acc_cand = acc_match.group(1).strip()
-            if len(re.sub(r"\D", "", acc_cand)) >= 8:
+            if _is_account_candidate(acc_cand):
                 document.account_number = _evidence(acc_cand, acc_match.group(0).strip(), 0.90, inferred=True)
     if not document.account_number.raw and kind == DocumentType.BANK_COPY:
         hyphen_acc = re.search(r"\b(\d{2,6}(?:-\d{2,7}){2,4})\b", text)
         if hyphen_acc:
             cand_acc = hyphen_acc.group(1).strip()
             digits_only = re.sub(r"\D", "", cand_acc)
-            if len(digits_only) >= 10 and not cand_acc.startswith("02-") and not cand_acc.startswith("010-") and not cand_acc.startswith("070-") and not cand_acc.startswith("050-") and not cand_acc.startswith("080-"):
-                if not is_valid_business_number(cand_acc):
-                    document.account_number = _evidence(cand_acc, hyphen_acc.group(0).strip(), 0.90, inferred=True)
+            # 일반 전화번호 형식(02-, 031-, 042-, 010- 등 전국 지역번호/휴대폰) 제외
+            is_phone = bool(re.match(r"^0\d{1,2}-\d{3,4}-\d{4}$", cand_acc)) or cand_acc.startswith(("02-", "010-", "070-", "050-", "080-"))
+            # 사업자등록번호 형식(3-2-5) 제외
+            is_biz = bool(re.match(r"^\d{3}-\d{2}-\d{5}$", cand_acc)) or is_valid_business_number(cand_acc)
+            # 법인/주민등록번호 형식(6-7) 제외
+            is_reg = bool(re.match(r"^\d{6}-\d{7}$", cand_acc))
+            if len(digits_only) >= 10 and not is_phone and not is_biz and not is_reg:
+                document.account_number = _evidence(cand_acc, hyphen_acc.group(0).strip(), 0.90, inferred=True)
+    if not document.account_number.raw and "은행계좌" in text:
+        bank_acc_match = re.search(
+            r"(?:국민|기업|중소기업|신한|우리|하나|농협|SC제일|씨티|카카오|케이|토스|대구|부산|광주|제주|전북|경남|우체국|새마을|신협|수협)(?:은행|금고|뱅크)?\s*[:：]?\s*([0-9\-–—]{7,25})",
+            text,
+        )
+        if bank_acc_match:
+            cand_acc = bank_acc_match.group(1).strip()
+            digits = re.sub(r"\D", "", cand_acc)
+            if len(digits) >= 9 and not is_valid_business_number(cand_acc) and not re.match(r"^0\d{1,2}-", cand_acc) and not re.match(r"^\d{4}-\d{4}$", cand_acc):
+                document.account_number = _evidence(cand_acc, bank_acc_match.group(0).strip(), 0.90, inferred=True)
+    if document.account_number.raw:
+        m_acc_clean = re.search(r"[0-9\-–—]{6,30}", document.account_number.raw)
+        if m_acc_clean and len(re.sub(r"\D", "", m_acc_clean.group(0))) >= 6:
+            document.account_number = _evidence(m_acc_clean.group(0).strip(), document.account_number.evidence, document.account_number.confidence)
 
     # 공식 온라인스토어 업체명 기본 매핑
     if kind == DocumentType.ONLINE_STORE_CART and not document.vendor_name.raw:
@@ -1472,7 +1697,7 @@ def extract_document(
             calc_subtotal = document.total.value - document.vat.value
             if calc_subtotal > 0 and 0.05 <= (document.vat.value / calc_subtotal) <= 0.15:
                 document.subtotal = Amount(calc_subtotal, _evidence(str(calc_subtotal), "합계금액-부가세 산술 추론", 0.65, True), "추론 공급가액")
-        if document.total.value is None:
+        if document.total.value is None or (document.subtotal.value is not None and document.total.value == document.subtotal.value and document.vat.value):
             # 금액 뒤에 "(VAT포함)" 또는 "부가세 포함"이 명시된 경우 탐색
             vat_inc_match = re.search(
                 r"(?:[₩\\W]?\s*(\d{1,3}(?:,\d{3})+|\d{4,}))\s*(?:\(?\s*(?:부가세\s*포함|VAT\s*포함|V\.?A\.?T\.?\s*포함)\s*\)?)",
@@ -1483,7 +1708,12 @@ def extract_document(
                 raw_amt = vat_inc_match.group(1)
                 clean_digits = re.sub(r"[^\d]", "", raw_amt)
                 if clean_digits:
-                    document.total = Amount(int(clean_digits), _evidence(raw_amt, vat_inc_match.group(0).strip(), 0.88, True), "VAT포함 추론")
+                    document.total = Amount(int(clean_digits), _evidence(raw_amt, vat_inc_match.group(0).strip(), 0.95, True), "VAT포함 추론")
+            elif document.subtotal.value is not None and document.vat.value is not None and document.vat.value > 0:
+                calc_val = document.subtotal.value + document.vat.value
+                calc_val_formatted = f"{calc_val:,}"
+                if calc_val_formatted in text or str(calc_val) in text:
+                    document.total = Amount(calc_val, _evidence(calc_val_formatted, "공급가액+부가세 산술 합계", 0.92, True), "합계금액 산출")
         if document.total.value is None:
             document.warnings.append("라벨 근거가 있는 합계 금액을 찾지 못했습니다. 최대 숫자를 합계로 확정하지 않았습니다.")
         if not document.items and kind == DocumentType.QUOTE:
@@ -1650,6 +1880,13 @@ def are_item_sets_comparable(items1: list[Item], items2: list[Item]) -> bool:
                 match_idx = idx
                 break
 
+            # 4. 주요 공통 키워드 / 영문 약어 일치 (예: RTA, CVD, ALD, HPLC 등 특수 장비/품목 식별어)
+            words1 = {w for w in re.findall(r"[A-Za-z0-9]{3,}", it1.name.lower()) if w not in ("the", "and", "for", "set", "box", "item", "system")}
+            words2 = {w for w in re.findall(r"[A-Za-z0-9]{3,}", it2.name.lower()) if w not in ("the", "and", "for", "set", "box", "item", "system")}
+            if words1 and words2 and (words1 & words2):
+                match_idx = idx
+                break
+
         if match_idx != -1:
             used2.add(match_idx)
         else:
@@ -1752,10 +1989,11 @@ def find_lowest_quote(documents: list[PurchaseDocument]) -> LowestPriceResult:
 
 
 def _lowest_quote_candidate(documents: list[PurchaseDocument]) -> Optional[PurchaseDocument]:
-    quotes = [d for d in documents if d.document_type in (DocumentType.QUOTE, DocumentType.ONLINE_STORE_CART) and d.total.value is not None]
-    if not quotes:
-        return None
-    return min(quotes, key=lambda q: q.total.value or 0)
+    quotes_with_amt = [d for d in documents if d.document_type in (DocumentType.QUOTE, DocumentType.ONLINE_STORE_CART) and d.total.value is not None]
+    if quotes_with_amt:
+        return min(quotes_with_amt, key=lambda q: q.total.value or 0)
+    quotes_any = [d for d in documents if d.document_type in (DocumentType.QUOTE, DocumentType.ONLINE_STORE_CART)]
+    return quotes_any[0] if quotes_any else None
 
 
 def _compare_field(
@@ -1800,6 +2038,43 @@ def _compare_field(
         return CheckResult(label, VerificationStatus.CONFLICT, f"{label} 불일치: 기준 견적='{expected}', {doc_name}='{actual}'.", expected, actual)
 
     # TEXT_REVIEW 정책 (상호, 대표자명 등 텍스트 전용)
+    # 대표자 다중 대표(각자대표/공동대표) 세트 비교
+    if "대표" in label:
+        def _extract_rep_set(v: str) -> set[str]:
+            v_clean = re.sub(r"[(\[]?\s*(?:각\s*자\s*대\s*표|공\s*동\s*대\s*표|대\s*표\s*이\s*사|대\s*표|인|직인|서명|印)\s*[)\]]?", " ", v)
+            parts = [normalize_name(p) for p in re.split(r"[,/&+\s]+", v_clean) if p.strip()]
+            return {p for p in parts if len(p) >= 2}
+
+        reps_expected = _extract_rep_set(expected)
+        reps_actual = _extract_rep_set(actual)
+        if reps_expected and reps_actual:
+            if reps_expected == reps_actual:
+                return CheckResult(
+                    label,
+                    VerificationStatus.PASS,
+                    f"{label} 일치 ({', '.join(sorted(reps_expected))}).",
+                    expected,
+                    actual,
+                )
+            if reps_expected.issubset(reps_actual) or reps_actual.issubset(reps_expected):
+                common = reps_expected & reps_actual
+                return CheckResult(
+                    label,
+                    VerificationStatus.PASS,
+                    f"{label} 일치 (각자대표/공동대표 중 일치 확인: {', '.join(sorted(common))}).",
+                    expected,
+                    actual,
+                )
+            if reps_expected & reps_actual:
+                common = reps_expected & reps_actual
+                return CheckResult(
+                    label,
+                    VerificationStatus.PASS,
+                    f"{label} 일치 (공동/각자대표 일부 일치: {', '.join(sorted(common))}).",
+                    expected,
+                    actual,
+                )
+
     # 마스터 DB 연동 매칭 검사 (견적서와 서류가 동일한 등록 마스터 업체로 매칭되는 경우)
     if "업체명" in label or "상호" in label:
         try:
@@ -1872,6 +2147,9 @@ def verify_documents(
                 c_vendor_check = _compare_field("공사 확인서 협력사명", _value(target.vendor_name), _value(confirm_doc.vendor_name), normalize_name, "공사 확인서", FieldPolicy.TEXT_REVIEW)
                 if c_vendor_check:
                     results.append(c_vendor_check)
+            elif target and _value(target.vendor_name) and not _value(confirm_doc.vendor_name):
+                results.append(CheckResult("공사 확인서 협력사명", VerificationStatus.REVIEW, "공사 확인서에서 시공업체(협력사)명을 명확히 추출하지 못했습니다. 수동 확인 필요.", _value(target.vendor_name), "미추출"))
+
             # 공사예정금액 일치 검증
             if target and target.total.value is not None and confirm_doc.total.value is not None:
                 amt_match = target.total.value == confirm_doc.total.value
@@ -1881,6 +2159,14 @@ def verify_documents(
                     f"공사 확인서 예정금액({confirm_doc.total.value:,}원)과 견적서 합계({target.total.value:,}원) 일치." if amt_match else f"금액 불일치: 견적서={target.total.value:,}원 vs 공사확인서={confirm_doc.total.value:,}원",
                     f"{target.total.value:,}원",
                     f"{confirm_doc.total.value:,}원",
+                ))
+            elif target and target.total.value is not None and confirm_doc.total.value is None:
+                results.append(CheckResult(
+                    "공사 확인서 금액",
+                    VerificationStatus.REVIEW,
+                    "공사 확인서에서 공사예정금액을 명확히 추출하지 못했습니다. 수동 확인 필요.",
+                    f"{target.total.value:,}원",
+                    "미추출",
                 ))
         else:
             results.append(CheckResult(
@@ -1904,7 +2190,7 @@ def verify_documents(
                 "산학협력단" in norm_q
                 or "산단" in norm_q
                 or bool(re.search(r"산\s*학\s*협\s*[력려련]\s*단?", norm_q))
-                or ("세종" in raw_text and ("산학협력단" in raw_text or "산단" in raw_text))
+                or (not q_rec and "세종" in raw_text and ("산학협력단" in raw_text or "산단" in raw_text))
             )
 
             # 2) 영문 IACF / Industry-Academic Cooperation Foundation 체크 (사용자 지침: 약자 iacf 포함 필수)
@@ -2057,6 +2343,22 @@ def verify_documents(
                         )
                 results.append(name_check)
             number_check = _compare_field("사업자등록증 사업자번호", _value(target.business_number), _value(license_doc.business_number), lambda v: re.sub(r"\D", "", v), "사업자등록증", FieldPolicy.EXACT)
+            if number_check and number_check.status == VerificationStatus.CONFLICT:
+                target_digits = re.sub(r"\D", "", _value(target.business_number))
+                lic_digits = re.sub(r"\D", "", _value(license_doc.business_number))
+                if len(target_digits) == 10 and len(lic_digits) == 10:
+                    diff_count = sum(1 for a, b in zip(target_digits, lic_digits) if a != b)
+                    if diff_count == 1:
+                        target_v = normalize_name(_value(target.vendor_name))
+                        lic_v = normalize_name(_value(license_doc.vendor_name))
+                        if target_v and lic_v and (target_v == lic_v or target_v in lic_v or lic_v in target_v):
+                            number_check = CheckResult(
+                                "사업자등록증 사업자번호",
+                                VerificationStatus.PASS,
+                                f"사업자등록증 사업자번호 일치 (상호 '{_value(target.vendor_name)}' 일치 및 OCR 1자리 오인식 보정 반영: {_value(target.business_number)})",
+                                _value(target.business_number),
+                                _value(license_doc.business_number),
+                            )
             if number_check:
                 results.append(number_check)
             rep_check = _compare_field("사업자등록증 대표자명", _value(target.representative), _value(license_doc.representative), normalize_name, "사업자등록증", FieldPolicy.TEXT_REVIEW)
@@ -2066,6 +2368,7 @@ def verify_documents(
         # 4. 통장사본 대조
         if bank_doc and target.document_type != DocumentType.ONLINE_STORE_CART:
             holder_check = _compare_field("통장사본 예금주", _value(target.vendor_name), _value(bank_doc.account_holder), normalize_name, "통장사본", FieldPolicy.TEXT_REVIEW)
+            account_check = _compare_field("통장사본 계좌번호", _value(target.account_number), _value(bank_doc.account_number), lambda v: re.sub(r"\D", "", v), "통장사본", FieldPolicy.EXACT)
             
             # 개인사업자 통장사본 예금주 형태 대조: "대표자(상호)" 또는 "상호(대표자)"
             holder_raw = _value(bank_doc.account_holder)
@@ -2134,9 +2437,20 @@ def verify_documents(
                                 _value(bank_doc.account_holder)
                             )
                             break
+
+            # 계좌번호가 견적서와 100% 일치할 경우: 통장사본 도트 폰트/인쇄 마모로 예금주 텍스트 미추출 시 계좌번호 일치를 근거로 인정
+            if account_check and account_check.status == VerificationStatus.PASS:
+                if holder_check and holder_check.status in (VerificationStatus.REVIEW, VerificationStatus.CONFLICT) and not holder_raw:
+                    holder_check = CheckResult(
+                        "통장사본 예금주",
+                        VerificationStatus.PASS,
+                        f"통장사본 계좌번호({_value(bank_doc.account_number)}) 견적서와 일치 확인 (통장 도트프린트 인쇄 특성상 상호 '{_value(target.vendor_name)}' 육안 대조 권장)",
+                        _value(target.vendor_name),
+                        f"{_value(target.vendor_name)} (계좌번호 일치)",
+                    )
+
             if holder_check:
                 results.append(holder_check)
-            account_check = _compare_field("통장사본 계좌번호", _value(target.account_number), _value(bank_doc.account_number), lambda v: re.sub(r"\D", "", v), "통장사본", FieldPolicy.EXACT)
             if account_check:
                 results.append(account_check)
 
@@ -2159,6 +2473,16 @@ def verify_documents(
                         "미검출",
                     ))
     for document in documents:
+        if document.raw_text:
+            is_anom, anom_msg = detect_ocr_anomaly(document.raw_text)
+            if is_anom:
+                results.append(CheckResult(
+                    f"OCR 품질 ({document.filename or '문서'})",
+                    VerificationStatus.REVIEW,
+                    f"문서 원본 텍스트 품질 저하/깨짐 감지 ({anom_msg}). 판독 오류 방지를 위해 원본 서류의 육안 대조가 필요합니다.",
+                    "정상 OCR 텍스트",
+                    anom_msg,
+                ))
         for warning in document.warnings:
             results.append(CheckResult(document.filename, VerificationStatus.WARNING, warning))
     return results

@@ -205,17 +205,54 @@ def extract_base_info(text: str) -> dict[str, str]:
     return info
 
 
+class ErpParseResult(tuple):
+    """ERP 행 파싱 결과 튜플: (items, valid_format) 2개 원소 언패킹을 100% 호환하면서 경고 목록 및 실패 행을 보존."""
+
+    def __new__(cls, items: list[dict[str, Any]], valid_format: bool, warnings: Optional[list[str]] = None, failed_lines: Optional[list[dict[str, Any]]] = None):
+        instance = super().__new__(cls, (items, valid_format))
+        instance.items = items
+        instance.valid_format = valid_format
+        instance.warnings = warnings or []
+        instance.failed_lines = failed_lines or []
+        return instance
+
+
 def get_accurate_total(text: str, keyword: str = "합계액") -> int:
-    """ERP 본문 내에서 합계액(구매요청액)을 정확히 추출합니다."""
+    """ERP 본문 내에서 합계액(구매요청액)을 정확히 추출합니다.
+
+    1. '합계액' / '구매요청액' 등 키워드에 인접한 금액 우선 탐색 (동일 행 또는 직후 콜론 뒤)
+    2. 과제 총연구비/예산 등 거대 금액으로의 오추출 방지
+    """
     if not text:
         return 0
+
+    # 1. 키워드 바로 뒤 인접 패턴 매칭
+    keywords = [keyword] if keyword else ["합계액", "구매요청액", "구매요구액", "총액", "합계"]
+    for kw in keywords:
+        if not kw or kw not in text:
+            continue
+        pattern = rf"{re.escape(kw)}[^\n\d]*?[:：.\t\s]*\s*(?:금\s*)?(?:원\s*)?([0-9]{{1,3}}(?:,[0-9]{{3}})+|[0-9]{{4,}})(?:\s*원)?"
+        m = re.search(pattern, text)
+        if m:
+            val = safe_int(m.group(1).replace(",", ""))
+            if val > 0:
+                return val
+
+    # 2. 키워드 기준 분할 영역 내 탐색 (fallback)
     search_area = text.split(keyword)[-1] if keyword and keyword in text else text
     search_area = re.sub(r"(?<!\d)\d+(?:-\d+)+(?!\d)", "", search_area)
     search_area = re.sub(r"(?<!\d)\d[\d,]*\s*(?:mm|cm|m|kg|g|mg|ml|l|v|hz|w|ea|u|%)(?!\w)", "", search_area, flags=re.IGNORECASE)
     search_area = re.sub(r"[a-zA-Z]+\d+|\d+[a-zA-Z]+", "", search_area)
-    # 한글 '원' 앞에서도 금액(2,500,000 등)이 잘리지 않도록 정규식 적용
-    all_numbers = re.findall(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?!\d)", search_area)
 
+    # '원'이 명시된 첫 번째 금액 우선 탐색
+    won_matches = re.findall(r"(?<!\d)([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,})\s*원", search_area)
+    if won_matches:
+        for wm in won_matches:
+            val = safe_int(wm.replace(",", ""))
+            if val >= 1000:
+                return val
+
+    all_numbers = re.findall(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?!\d)", search_area)
     clean_numbers = []
     for n in all_numbers:
         num_str = n.replace(",", "")
@@ -231,19 +268,25 @@ def get_accurate_total(text: str, keyword: str = "합계액") -> int:
                 continue
         if val >= 1000 or val == 0:
             clean_numbers.append(val)
-    return max(clean_numbers) if clean_numbers else 0
+    return clean_numbers[0] if clean_numbers else 0
 
 
 def parse_goods_erp(text: str) -> tuple[list[dict[str, Any]], bool]:
     """물품 내역 행을 탭 구분자로 파싱합니다."""
     items = []
     valid_format = False
+    warnings = []
+    failed_lines = []
     if not text or not text.strip():
-        return items, valid_format
+        return ErpParseResult(items, valid_format, warnings, failed_lines)
 
-    for line in text.strip().split("\n"):
-        if not line.strip():
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+    header_kws = ["품명", "규격", "단위", "수량", "단가", "금액", "등록여부", "물품등록", "업체"]
+
+    for line_idx, line in enumerate(lines, start=1):
+        if sum(1 for kw in header_kws if kw in line) >= 3:
             continue
+
         tokens = line.split("\t")
         try:
             anchor_idx = next((i for i, t in enumerate(tokens) if t.strip() in ["예", "아니오"]), -1)
@@ -272,7 +315,7 @@ def parse_goods_erp(text: str) -> tuple[list[dict[str, Any]], bool]:
                         clean_num = safe_int(tok)
                         if clean_num > 0:
                             raw_nums.append((idx, clean_num, tok))
-                    
+
                     price = raw_nums[-1][1] if raw_nums else 0
                     unit_price = raw_nums[-2][1] if len(raw_nums) >= 2 else price
                     qty = raw_nums[0][1] if len(raw_nums) >= 3 else 1
@@ -316,21 +359,36 @@ def parse_goods_erp(text: str) -> tuple[list[dict[str, Any]], bool]:
                     "price": price,
                     "unit_price": unit_price,
                 })
-        except Exception:
-            continue
-    return items, valid_format
+            else:
+                if len(tokens) >= 3:
+                    msg = f"행 {line_idx} 물품등록여부('예/아니오') 앵커 미검출로 건너뜀: '{line[:40]}'"
+                    warnings.append(msg)
+                    failed_lines.append({"line_idx": line_idx, "content": line, "reason": "앵커 미검출"})
+        except Exception as e:
+            msg = f"행 {line_idx} 파싱 예외 발생 ({e}): '{line[:40]}'"
+            warnings.append(msg)
+            failed_lines.append({"line_idx": line_idx, "content": line, "reason": str(e)})
+
+    valid_format = bool(items) and valid_format
+    return ErpParseResult(items, valid_format, warnings, failed_lines)
 
 
 def parse_service_erp(text: str, force_category: str = "용역") -> tuple[list[dict[str, Any]], bool]:
     """용역/공사 내역 행을 탭 구분자로 파싱합니다."""
     items = []
     valid_format = False
+    warnings = []
+    failed_lines = []
     if not text or not text.strip():
-        return items, valid_format
+        return ErpParseResult(items, valid_format, warnings, failed_lines)
 
-    for line in text.strip().split("\n"):
-        if not line.strip():
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+    header_kws = ["품명", "규격", "단위", "수량", "단가", "금액", "등록여부", "업체"]
+
+    for line_idx, line in enumerate(lines, start=1):
+        if sum(1 for kw in header_kws if kw in line) >= 3:
             continue
+
         tokens = line.split("\t")
         try:
             if len(tokens) >= 15:
@@ -349,9 +407,17 @@ def parse_service_erp(text: str, force_category: str = "용역") -> tuple[list[d
                     "price": safe_int(tokens[8]),
                     "unit_price": safe_int(tokens[5]),
                 })
-        except Exception:
-            continue
-    return items, valid_format
+            elif len(tokens) >= 5:
+                msg = f"행 {line_idx} 용역 열 수 부족 ({len(tokens)}개 < 15개): '{line[:40]}'"
+                warnings.append(msg)
+                failed_lines.append({"line_idx": line_idx, "content": line, "reason": "열 수 부족"})
+        except Exception as e:
+            msg = f"행 {line_idx} 파싱 예외 발생 ({e}): '{line[:40]}'"
+            warnings.append(msg)
+            failed_lines.append({"line_idx": line_idx, "content": line, "reason": str(e)})
+
+    valid_format = bool(items) and valid_format
+    return ErpParseResult(items, valid_format, warnings, failed_lines)
 
 
 def is_fixture_item(clean_name: str, raw_cat: str = "") -> bool:
@@ -383,7 +449,7 @@ def is_consumable_item(clean_name: str, raw_cat: str = "") -> bool:
 
 def guess_category_by_keyword(name: str, price: int = 0, unit_price: int = 0, raw_cat: str = "") -> str:
     """품목명 기반 물품분류구분 (비품/소모품/구성품/용역/공사) 추천.
-    
+
     세종대학교 기준:
     - 집기류(책상, 의자 등): 단가와 무관하게 품목 성격상 '비품'
     - 기계기구/일반장비(모니터, PC, 분석기 등): 단가와 무관하게 품목 성격상 '비품'
@@ -393,22 +459,23 @@ def guess_category_by_keyword(name: str, price: int = 0, unit_price: int = 0, ra
     ※ 단가 기준(15만/30만/200만)은 분류가 아닌 오직 '자산등록여부(예/아니오)'만 판정합니다.
     """
     clean_name = name.replace(" ", "").lower()
+    raw_cat_clean = raw_cat.strip()
 
     # 1. 구성품 키워드
     component_kws = ["구성품", "부속품", "옵션모듈", "확장보드", "추가모듈", "장착키트", "브라켓", "확장카드"]
-    if any(kw in clean_name for kw in component_kws) or raw_cat == "구성품":
+    if any(kw in clean_name for kw in component_kws) or raw_cat_clean == "구성품":
         return "구성품"
 
     # 2. 소프트웨어 (비품)
-    if is_software_item(clean_name, raw_cat):
+    if is_software_item(clean_name, raw_cat_clean):
         return "비품"
 
     # 3. 집기류 (단가 15만원 미만이어도 본질상 비품)
-    if is_fixture_item(clean_name, raw_cat):
+    if is_fixture_item(clean_name, raw_cat_clean):
         return "비품"
 
     # 4. 순수 소모품 키워드
-    if is_consumable_item(clean_name, raw_cat):
+    if is_consumable_item(clean_name, raw_cat_clean):
         return "소모품"
 
     # 5. 시제작품 / 시작품 / 시제품 제작 (세종대 실무 기준: 용역이 아닌 물품구매(비품)로 처리)
@@ -416,7 +483,21 @@ def guess_category_by_keyword(name: str, price: int = 0, unit_price: int = 0, ra
     if any(kw in clean_name for kw in prototype_kws):
         return "비품"
 
-    # 6. 기계기구 및 일반 연구장비/물품 (모니터, 컴퓨터 등 내구재는 기본적으로 비품)
+    # 6. 명시적 기계기구 및 연구장비 키워드
+    equipment_kws = [
+        "모니터", "pc", "컴퓨터", "노트북", "맥북", "아이맥", "서버", "워크스테이션", "본체",
+        "프린터", "복합기", "스캐너", "현미경", "분석기", "측정기", "오실로스코프", "파워서플라이",
+        "챔버", "오븐", "원심분리기", "냉장고", "냉동고", "인큐베이터", "카메라", "렌즈",
+        "프로젝터", "태블릿", "아이패드", "스마트폰", "계측기", "발생기"
+    ]
+    if any(kw in clean_name for kw in equipment_kws) or raw_cat_clean in ["비품", "기계기구", "집기"]:
+        return "비품"
+
+    # 7. 사용자가 이미 유효한 분류(소모품 등)를 입력했다면, 명백한 장비가 아닌 한 사용자 입력 존중
+    if raw_cat_clean in ["소모품", "비품", "구성품", "용역", "공사"]:
+        return raw_cat_clean
+
+    # 8. 미분류 일반 내구재 기본값은 비품
     return "비품"
 
 
@@ -522,14 +603,49 @@ def generate_opinion(
     return f"1. {contract_type}에 의한 구매건\n - 물품분류구분 : {final_category}\n\n2. 확인사항\n{issues_text}"
 
 
+_LOANWORD_MAP = {
+    "맥북": "macbook", "아이맥": "imac", "아이패드": "ipad", "맥스튜디오": "macstudio", "맥미니": "macmini",
+    "프로": "pro", "에어": "air", "울트라": "ultra", "플러스": "plus", "맥스": "max",
+    "모니터": "monitor", "키보드": "keyboard", "마우스": "mouse", "케이블": "cable", "어댑터": "adapter",
+    "젠더": "gender", "허브": "hub", "독": "dock", "도킹": "docking", "거치대": "stand", "스탠드": "stand",
+    "헤드셋": "headset", "헤드폰": "headphone", "이어폰": "earphone", "스피커": "speaker",
+    "프린터": "printer", "스캐너": "scanner", "복합기": "mfp", "토너": "toner", "잉크": "ink",
+    "서버": "server", "스위치": "switch", "라우터": "router", "공유기": "router", "방화벽": "firewall",
+    "소프트웨어": "software", "라이선스": "license", "라이센스": "license", "구독": "subscription",
+    "데스크탑": "desktop", "데스크톱": "desktop", "노트북": "laptop", "랩탑": "laptop", "태블릿": "tablet",
+    "하드": "hdd", "하드디스크": "hdd", "드라이브": "drive", "메모리": "ram", "램": "ram",
+    "그래픽카드": "gpu", "그래픽": "graphic", "메인보드": "motherboard", "마더보드": "motherboard",
+    "파워": "psu", "쿨러": "cooler", "케이스": "case", "의자": "chair", "책상": "desk",
+    "테이블": "table", "서랍장": "drawer", "캐비닛": "cabinet", "파티션": "partition",
+}
+
+
+def _normalize_item_text(text: str) -> str:
+    """한영 외래어 치환 및 정규화로 품목명 매칭 유사도를 극대화합니다."""
+    t = str(text).lower()
+    for ko, en in _LOANWORD_MAP.items():
+        t = t.replace(ko, en)
+    return re.sub(r"[^\w가-힣]", "", t)
+
+
 def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -> list[dict[str, Any]]:
-    """ERP 품목과 견적서 추출 품목 간 문자열 유사도 및 금액 기반 스마트 매칭.
-    
-    1. 개별 행 1:1 매칭 우선 탐색
+    """ERP 품목과 견적서 추출 품목 간 문자열 유사도 및 금액 기반 스마트 1:1 매칭.
+
+    1. 개별 행 1:1 탐욕적(Greedy) 매칭 — 단일 견적 품목의 중복 매칭 원천 차단
     2. 조립PC/공사/용역/세트상품 등 품목명·행수가 다르더라도, 총액이 일치하면 산출내역서 형태로 동일 구매 추정
     """
     if not erp_items:
         return []
+
+    if not doc_items:
+        return [{
+            "ERP 입력 품명": str(i.get("name", "")),
+            "견적서 매칭 품명": "미검출 (견적서 품목 없음)",
+            "매칭 기준": "실패",
+            "수량 검증": "➖ 비교 불가",
+            "금액 검증": "➖ 비교 불가",
+            "최종 판정": "🚨 매칭 실패",
+        } for i in erp_items]
 
     # 전체 총액 계산 (공급가액 및 VAT 포함 여부 판정)
     total_erp = sum(safe_int(i.get("price", 0)) for i in erp_items)
@@ -544,15 +660,16 @@ def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -
     is_total_vat = (total_erp > 0 and total_doc > 0 and (total_erp == round(total_doc * 1.1) or abs(total_erp - round(total_doc * 1.1)) <= 10))
     is_total_matched = is_total_exact or is_total_vat
 
-    match_results = []
-    for erp_itm in erp_items:
+    # 1. 모든 (ERP 품목, 견적 품목) 쌍의 유사도 및 점수 전수 계산
+    candidate_pairs = []
+    for e_idx, erp_itm in enumerate(erp_items):
         erp_name = str(erp_itm.get("name", ""))
         erp_qty = safe_int(erp_itm.get("qty", 1)) or 1
         erp_price = safe_int(erp_itm.get("price", 0))
+        norm_erp = _normalize_item_text(erp_name)
+        tokens_erp = set(re.findall(r"[a-z0-9]+", norm_erp))
 
-        best_match, best_score, best_doc_qty, best_doc_amount = None, 0, 0, 0
-
-        for d_itm in doc_items:
+        for d_idx, d_itm in enumerate(doc_items):
             doc_name = getattr(d_itm, "name", "") if hasattr(d_itm, "name") else d_itm.get("품명", "")
             doc_qty = safe_int(getattr(d_itm, "quantity", 1) if hasattr(d_itm, "quantity") else d_itm.get("수량", 1)) or 1
             doc_unit_price = safe_int(getattr(d_itm, "unit_price", 0) if hasattr(d_itm, "unit_price") else d_itm.get("단가", 0))
@@ -560,57 +677,145 @@ def smart_item_matching(erp_items: list[dict[str, Any]], doc_items: list[Any]) -
             if doc_amount == 0:
                 doc_amount = doc_unit_price * doc_qty
 
-            norm_erp = re.sub(r"[^\w가-힣]", "", erp_name).lower()
-            norm_doc = re.sub(r"[^\w가-힣]", "", str(doc_name)).lower()
+            norm_doc = _normalize_item_text(doc_name)
+            tokens_doc = set(re.findall(r"[a-z0-9]+", norm_doc))
+
+            # 문자열 유사도
             text_score = difflib.SequenceMatcher(None, norm_erp, norm_doc).ratio() * 100
 
+            # 부분 포함 관계 가산
+            if norm_erp and norm_doc and (norm_erp in norm_doc or norm_doc in norm_erp) and min(len(norm_erp), len(norm_doc)) >= 2:
+                text_score = max(text_score, 70.0)
+
+            # 모델명/영숫자 토큰 일치 가산
+            common_tokens = tokens_erp & tokens_doc
+            if common_tokens:
+                text_score = min(100.0, text_score + len(common_tokens) * 15.0)
+
+            # 금액 일치 여부 및 점수
             price_score = 0
+            is_price_exact = False
+            is_price_vat = False
+            is_price_cut = False
             if erp_price > 0 and doc_amount > 0:
                 if erp_price == doc_amount:
                     price_score = 500
+                    is_price_exact = True
                 elif erp_price == round(doc_amount * 1.1):
                     price_score = 500
+                    is_price_vat = True
                 elif abs(erp_price - round(doc_amount * 1.1)) <= 10:
                     price_score = 400
+                    is_price_cut = True
 
-            total_score = text_score + price_score
-            if total_score > best_score:
-                best_score = total_score
-                best_match = doc_name
-                best_doc_qty = doc_qty
-                best_doc_amount = doc_amount
+            # 수량 일치 가산
+            qty_bonus = 20 if (erp_qty == doc_qty) else 0
 
-        is_matched = best_score >= 400 or (best_score >= 50 and price_score > 0) or (best_score >= 60 and erp_price == 0)
-        name_status = "✅ 매칭 성공" if is_matched else "🚨 매칭 실패"
-        qty_status = (
-            "✅ 일치"
-            if (is_matched and erp_qty == best_doc_qty)
-            else (f"🚨 다름 (ERP: {erp_qty} / 견적: {best_doc_qty})" if is_matched else "➖ 비교 불가")
-        )
+            total_score = text_score + price_score + qty_bonus
 
-        # 금액 검증 (공급가 일치, VAT 10% 일치, 차액 판정)
-        if is_matched and erp_price > 0 and best_doc_amount > 0:
-            if erp_price == best_doc_amount:
-                amt_status = "✅ 일치"
-            elif erp_price == round(best_doc_amount * 1.1):
-                amt_status = "✅ VAT(10%) 일치"
-            elif abs(erp_price - round(best_doc_amount * 1.1)) <= 10:
-                amt_status = "✅ 절사 일치"
+            candidate_pairs.append({
+                "e_idx": e_idx,
+                "d_idx": d_idx,
+                "erp_name": erp_name,
+                "erp_qty": erp_qty,
+                "erp_price": erp_price,
+                "doc_name": doc_name,
+                "doc_qty": doc_qty,
+                "doc_amount": doc_amount,
+                "text_score": text_score,
+                "price_score": price_score,
+                "is_price_exact": is_price_exact,
+                "is_price_vat": is_price_vat,
+                "is_price_cut": is_price_cut,
+                "total_score": total_score,
+            })
+
+    # 점수 높은 순으로 정렬하여 1:1 탐욕적(Greedy) 할당
+    candidate_pairs.sort(key=lambda x: x["total_score"], reverse=True)
+
+    matched_erp: dict[int, dict[str, Any]] = {}
+    used_docs: set[int] = set()
+
+    for cand in candidate_pairs:
+        e_idx = cand["e_idx"]
+        d_idx = cand["d_idx"]
+        if e_idx in matched_erp or d_idx in used_docs:
+            continue
+
+        text_score = cand["text_score"]
+        price_score = cand["price_score"]
+        erp_price = cand["erp_price"]
+        single_pair = (len(erp_items) == 1 and len(doc_items) == 1)
+
+        # 매칭 승인 조건:
+        # 1. 텍스트 유사도가 충분한 경우 (>= 50)
+        # 2. 금액이 일치하고 텍스트도 최소한의 유의미성(>= 20)이 있거나 1:1 단일 건인 경우
+        # 3. 금액 미기재(erp_price == 0)이나 텍스트 유사도가 높은 경우 (>= 60)
+        is_acceptable = False
+        if text_score >= 50:
+            is_acceptable = True
+        elif price_score >= 400 and (text_score >= 20 or single_pair):
+            is_acceptable = True
+        elif erp_price == 0 and text_score >= 60:
+            is_acceptable = True
+
+        if is_acceptable:
+            matched_erp[e_idx] = cand
+            used_docs.add(d_idx)
+
+    # ERP 품목 순서대로 매칭 결과표 작성
+    match_results = []
+    for e_idx, erp_itm in enumerate(erp_items):
+        erp_name = str(erp_itm.get("name", ""))
+        erp_qty = safe_int(erp_itm.get("qty", 1)) or 1
+        erp_price = safe_int(erp_itm.get("price", 0))
+
+        if e_idx in matched_erp:
+            cand = matched_erp[e_idx]
+            doc_name = cand["doc_name"]
+            doc_qty = cand["doc_qty"]
+            doc_amount = cand["doc_amount"]
+            text_score = cand["text_score"]
+            price_score = cand["price_score"]
+
+            name_status = "✅ 매칭 성공"
+            qty_status = "✅ 일치" if (erp_qty == doc_qty) else f"🚨 다름 (ERP: {erp_qty} / 견적: {doc_qty})"
+
+            if erp_price > 0 and doc_amount > 0:
+                if cand["is_price_exact"]:
+                    amt_status = "✅ 일치"
+                elif cand["is_price_vat"]:
+                    amt_status = "✅ VAT(10%) 일치"
+                elif cand["is_price_cut"]:
+                    amt_status = "✅ 절사 일치"
+                else:
+                    amt_status = f"🚨 차액 ({erp_price - doc_amount:+,}원)"
+            elif erp_price > 0 or doc_amount > 0:
+                amt_status = "➖ 금액 확인요망"
             else:
-                amt_status = f"🚨 차액 ({erp_price - best_doc_amount:+,}원)"
-        elif is_matched and (erp_price > 0 or best_doc_amount > 0):
-            amt_status = "➖ 금액 확인요망"
-        else:
-            amt_status = "➖ 비교 불가"
+                amt_status = "➖ 비교 불가"
 
-        match_results.append({
-            "ERP 입력 품명": erp_name,
-            "견적서 매칭 품명": best_match if is_matched else "매칭 실패",
-            "매칭 기준": "💰 금액 매칭" if best_score >= 400 else ("📝 이름 매칭" if best_score >= 50 else "실패"),
-            "수량 검증": qty_status,
-            "금액 검증": amt_status,
-            "최종 판정": name_status,
-        })
+            basis_str = "💰 금액 및 품명 일치" if (price_score >= 400 and text_score >= 40) else (
+                "💰 금액 매칭" if price_score >= 400 else "📝 이름 매칭"
+            )
+
+            match_results.append({
+                "ERP 입력 품명": erp_name,
+                "견적서 매칭 품명": doc_name,
+                "매칭 기준": basis_str,
+                "수량 검증": qty_status,
+                "금액 검증": amt_status,
+                "최종 판정": name_status,
+            })
+        else:
+            match_results.append({
+                "ERP 입력 품명": erp_name,
+                "견적서 매칭 품명": "매칭 실패",
+                "매칭 기준": "실패",
+                "수량 검증": "➖ 비교 불가",
+                "금액 검증": "➖ 비교 불가",
+                "최종 판정": "🚨 매칭 실패",
+            })
 
     # -------------------------------------------------------------
     # 🌟 2단계: 총액 기준 산출내역서/동일구매 추정 (조립PC/공사/용역 등 N:1 또는 세부내역 합산)

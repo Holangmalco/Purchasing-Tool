@@ -30,7 +30,7 @@ for t_path in [
 from purchase_verifier.core import (
     CheckResult, DocumentType, PurchaseDocument, VerificationStatus,
     classify_document, detect_ocr_anomaly, extract_document,
-    find_lowest_quote, mask_account_number, verify_documents,
+    find_lowest_quote, is_valid_business_number, mask_account_number, verify_documents,
 )
 from purchase_verifier.vendor_cache import (
     auto_cache_verified_documents, get_vendor_by_biz_num, save_vendor,
@@ -341,9 +341,15 @@ def main() -> None:
         total_erp_amt = get_accurate_total(raw_req, "합계액")
 
         if "물품" in req_type:
-            item_list, is_valid_erp = parse_goods_erp(raw_itm)
+            erp_res = parse_goods_erp(raw_itm)
         else:
-            item_list, is_valid_erp = parse_service_erp(raw_itm, force_category="용역" if "용역" in req_type else "공사, 용역")
+            erp_res = parse_service_erp(raw_itm, force_category="용역" if "용역" in req_type else "공사, 용역")
+        item_list, is_valid_erp = erp_res[0], erp_res[1]
+
+        if getattr(erp_res, "warnings", None):
+            with st.expander(f"⚠️ ERP 품목 파싱 안내 및 주의사항 ({len(erp_res.warnings)}건)", expanded=False):
+                for w in erp_res.warnings:
+                    st.caption(f"• {w}")
 
         # ---------------------------------------------------------
         # 연차연구기간 종료일 모니터링 배너 (사용자 요구사항 4번)
@@ -415,11 +421,19 @@ def main() -> None:
             reference_date=ref_date,
         )
         auto_reject_reasons = []
+        manual_review_reasons = []
 
-        # 검증 결과에서 반려(BLOCKED) 항목 수집
+        # 검증 결과에서 반려(BLOCKED), 충돌(CONFLICT), 필수누락(MISSING), 확인필요(REVIEW) 수집
         for r in results:
+            first_line = r.detail.split("\n")[0].replace("반려 대상: ", "")
             if r.status == VerificationStatus.BLOCKED:
-                auto_reject_reasons.append(r.detail.split("\n")[0].replace("반려 대상: ", ""))
+                auto_reject_reasons.append(first_line)
+            elif r.status == VerificationStatus.CONFLICT:
+                auto_reject_reasons.append(f"서류 정보 불일치: {first_line}")
+            elif r.status == VerificationStatus.MISSING:
+                auto_reject_reasons.append(f"필수 서류 미제출: {r.name} ({first_line})")
+            elif r.status == VerificationStatus.REVIEW:
+                manual_review_reasons.append(f"{r.name}: {first_line}")
 
         # 국세청 사업자 실시간 휴폐업 조회
         target_doc = next((d for d in documents if d.filename == selected_filename), None) or (quotes[0] if quotes else None)
@@ -476,14 +490,24 @@ def main() -> None:
         # 🚫 [반려 사유 자동 생성] 원클릭 복사창
         # ---------------------------------------------------------
         if auto_reject_reasons:
-            st.warning(f"**⚠️ 서류 검증 경고 및 반려 사유 발생**\n\n{report_summary_text}")
+            st.error(f"**🚫 서류 검증 탈락 및 반려 대상 발생 ({len(auto_reject_reasons)}건)**\n\n{report_summary_text}")
             rej_text = "안녕하세요 교수님, 산학협력단 구매담당자입니다.\n요청해주신 건에 대해 아래 사유로 보완 및 재발행이 필요하여 안내드립니다.\n\n"
             for idx, r_reason in enumerate(auto_reject_reasons, start=1):
                 rej_text += f"{idx}. {r_reason}\n"
+            if manual_review_reasons:
+                rej_text += "\n[추가 검토 필요 사항]\n"
+                for idx, m_reason in enumerate(manual_review_reasons, start=1):
+                    rej_text += f" - {m_reason}\n"
             rej_text += "\n서류 보완 후 재요청 부탁드립니다. 감사합니다."
             st.code(rej_text, language="text")
+        elif manual_review_reasons:
+            st.warning(f"**⚠️ 담당자 수동 검토 필요 항목 ({len(manual_review_reasons)}건)**\n\n{report_summary_text}")
+            rev_text = "💡 **담당자 육안 확인 요망 항목:**\n"
+            for idx, m_reason in enumerate(manual_review_reasons, start=1):
+                rev_text += f"{idx}. {m_reason}\n"
+            st.info(rev_text)
         else:
-            st.success(f"**🎉 모든 서류 교차 검증 통과 (적합)**\n\n{report_summary_text}")
+            st.success(f"**🎉 모든 서류 교차 검증 완벽 통과 (적합)**\n\n{report_summary_text}")
 
         # ---------------------------------------------------------
         # 📋 상세 교차 검증 테이블
@@ -738,18 +762,21 @@ def main() -> None:
             }
             save_to_cache(req_no_val, meta_save, raw_save)
             if t_biz and t_ven:
-                try:
-                    save_vendor(
-                        biz_num=t_biz,
-                        vendor_name=t_ven,
-                        representative=t_rep,
-                        account_num=t_acc_num,
-                        account_holder=t_acc_holder,
-                        phone=t_phn,
-                        email=t_eml,
-                    )
-                except Exception:
-                    pass
+                if is_valid_business_number(t_biz):
+                    try:
+                        save_vendor(
+                            biz_num=t_biz,
+                            vendor_name=t_ven,
+                            representative=t_rep,
+                            account_num=t_acc_num,
+                            account_holder=t_acc_holder,
+                            phone=t_phn,
+                            email=t_eml,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    st.warning("⚠️ 입력된 사업자등록번호의 국세청 검증규격(체크섬)이 올바르지 않아 거래처 마스터 DB 자동 등록은 건너뛰었습니다.")
             st.success(f"✅ 구매요구번호 [{req_no_val}] 건의 데이터 및 거래처 마스터 정보가 성공적으로 저장되었습니다! ('과거 작업 내역 불러오기'에서 확인 가능)")
 
 

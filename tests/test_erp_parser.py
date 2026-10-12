@@ -391,3 +391,90 @@ def test_smart_matching_case_b_pending_review():
     assert "확인필요" in df.iloc[1]["최종 판정"]
     assert "대조 불가" in df.iloc[0]["수량 검증"]
 
+
+def test_smart_matching_1_to_1_prevents_duplicate_reassignment():
+    """하나의 견적서 품목이 여러 ERP 품목에 중복 매칭되지 않고 1:1로만 할당됨을 검증."""
+    from purchase_verifier.core import Item
+    from purchase_verifier.erp_parser import smart_item_matching
+
+    erp_items = [
+        {"name": "27인치 4K 모니터", "qty": 1, "price": 300_000},
+        {"name": "27인치 4K 모니터", "qty": 1, "price": 300_000},
+    ]
+    # 견적서에는 1건만 존재
+    doc_items = [
+        Item(name="27인치 4K 모니터", quantity=1, unit_price=300_000, amount=300_000),
+    ]
+    matched = smart_item_matching(erp_items, doc_items)
+    assert len(matched) == 2
+    # 첫 번째 ERP 품목은 매칭 성공
+    assert matched[0]["최종 판정"] == "✅ 매칭 성공"
+    assert matched[0]["견적서 매칭 품명"] == "27인치 4K 모니터"
+    # 두 번째 ERP 품목은 중복 할당되지 않고 실패로 처리
+    assert matched[1]["최종 판정"] == "🚨 매칭 실패"
+    assert matched[1]["견적서 매칭 품명"] == "매칭 실패"
+
+
+def test_smart_matching_empty_doc_items_safe():
+    """견적서 품목이 빈 리스트일 때 UnboundLocalError 없이 안전하게 매칭 실패 결과를 반환함을 검증."""
+    from purchase_verifier.erp_parser import smart_item_matching
+
+    erp_items = [{"name": "노트북", "qty": 1, "price": 1_500_000}]
+    matched = smart_item_matching(erp_items, [])
+    assert len(matched) == 1
+    assert matched[0]["최종 판정"] == "🚨 매칭 실패"
+    assert "미검출" in matched[0]["견적서 매칭 품명"]
+
+
+def test_smart_matching_unrelated_names_same_price_not_false_pass():
+    """품목명이 완전히 무관하고 금액만 우연히 같은 경우(복수 건), 이름 매칭 성공으로 오분류되지 않음을 검증."""
+    from purchase_verifier.core import Item
+    from purchase_verifier.erp_parser import smart_item_matching
+
+    erp_items = [
+        {"name": "사무용 의자", "qty": 1, "price": 500_000},
+        {"name": "연구용 책상", "qty": 1, "price": 400_000},
+    ]
+    # 견적서는 네트워크 허브 및 광케이블 (의자/책상과 완전 무관)
+    doc_items = [
+        Item(name="기가비트 L2 스위치 허브", quantity=1, unit_price=500_000, amount=500_000),
+        Item(name="광통신 컨버터 모듈", quantity=1, unit_price=400_000, amount=400_000),
+    ]
+    matched = smart_item_matching(erp_items, doc_items)
+    assert len(matched) == 2
+    # 이름 유사도가 낮으므로 개별 이름 매칭 성공(📝 이름 매칭)으로 분류되지 않아야 함
+    for m in matched:
+        assert m.get("매칭 기준") != "📝 이름 매칭"
+
+
+def test_get_accurate_total_avoids_large_project_budget():
+    """구매요청액 바로 뒤의 금액을 우선 추출하며, 문서 하단에 등장하는 거대 과제 총연구비에 현혹되지 않음을 검증."""
+    from purchase_verifier.erp_parser import get_accurate_total
+
+    text = """
+    구매요구내역서
+    구매요청액: 2,500,000원
+    과제정보:
+    총연구비: 500,000,000원 (총 정부지원금 1,000,000,000원)
+    """
+    total = get_accurate_total(text, "구매요청액")
+    assert total == 2_500_000
+
+
+def test_parse_goods_erp_failed_line_tracking():
+    """앵커가 누락되거나 파싱할 수 없는 행이 있을 때 경고 및 failed_lines가 올바르게 기록됨을 검증."""
+    from purchase_verifier.erp_parser import parse_goods_erp
+
+    raw_text = """
+    1\t맥북 프로 16\t스그\tM3\t1\tea\t3,000,000\t3,000,000\t비품\t예\t홍길동 010-1234-5678
+    2\t깨진 행 데이터\t비정상컬럼들\t등록여부누락
+    """
+    res = parse_goods_erp(raw_text)
+    items, is_valid = res
+    assert is_valid
+    assert len(items) == 1
+    assert len(res.warnings) >= 1
+    assert len(res.failed_lines) >= 1
+    assert res.failed_lines[0]["reason"] == "앵커 미검출"
+
+

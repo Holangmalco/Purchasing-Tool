@@ -230,3 +230,26 @@ def test_find_matching_vendor_fuzzy(temp_db):
     m3 = find_matching_vendor_fuzzy("전혀다른업체", db_path=temp_db)
     assert m3 is None
 
+
+def test_auto_cache_aborts_on_document_conflict(temp_db):
+    docs = [
+        PurchaseDocument(
+            filename="quote.pdf",
+            document_type=DocumentType.QUOTE,
+            raw_text="견적서",
+            business_number=Evidence(raw=VALID_BIZ_NUM, evidence=VALID_BIZ_NUM),
+            vendor_name=Evidence(raw="원래업체명", evidence="원래업체명"),
+        ),
+        PurchaseDocument(
+            filename="biz_license.pdf",
+            document_type=DocumentType.BUSINESS_LICENSE,
+            raw_text="사업자등록증",
+            business_number=Evidence(raw="123-45-67890", evidence="123-45-67890"),
+            vendor_name=Evidence(raw="완전히다른업체명", evidence="완전히다른업체명"),
+        ),
+    ]
+    cached = auto_cache_verified_documents(docs, db_path=temp_db)
+    assert cached is None
+    assert get_vendor_by_biz_num(VALID_BIZ_NUM, db_path=temp_db) is None
+
+
