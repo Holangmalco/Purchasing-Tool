@@ -1,0 +1,32 @@
+Hanja Quote Documents Count: 10
+
+[media_1789634351288.pdf] Vendor: (주)선영시스텍 / Amount: 10,909,091 KRW
+  Found Terms: 견적(見積), 금액(金額), 귀중(貴中)
+
+[media_1790037571578.pdf] Vendor: 새빔 / Amount: 21,054,000 KRW
+  Found Terms: 견 적(見 積)
+
+[media_1789364832022.pdf] Vendor:  / Amount: 3,784,000 KRW
+  Found Terms: 금 액(金 額), 귀하(貴下), 품 명(品 名), 규 격(規 格), 수 량(數 量), 단 가(單 價)
+
+[media_1789366894008.pdf] Vendor: ㈜온스트림 / Amount: 7,400,000 KRW
+  Found Terms: 귀중(貴中)
+
+[media_1789366894050.pdf] Vendor:  / Amount: 6,850,000 KRW
+  Found Terms: 귀중(貴中)
+
+[media_1789372146349.pdf] Vendor: (주)영진산업안전 / Amount: 8,800,000 KRW
+  Found Terms: 견 적(見 積)
+
+[media_1789372146368.pdf] Vendor: ㈜ 현원상사 / Amount: 7,865,000 KRW
+  Found Terms: 견 적(見 積)
+
+[media_1789533221101.pdf] Vendor: (주)폭스소프트 / Amount: 2,068,000 KRW
+  Found Terms: 견 적(見 積)
+
+[media_1789537434698.pdf] Vendor: 케이투엠플러스 / Amount: 25,718,000 KRW
+  Found Terms: 귀중(貴中), 대 표(代 表)
+
+[media_1789537440547.pdf] Vendor: 주식회사 대영오에이 / Amount: 1,716,000 KRW
+  Found Terms: 견적(見積), 견 적(見 積), 귀중(貴中)
+

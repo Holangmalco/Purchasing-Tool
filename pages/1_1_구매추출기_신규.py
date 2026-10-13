@@ -29,8 +29,8 @@ for t_path in [
 
 from purchase_verifier.core import (
     CheckResult, DocumentType, PurchaseDocument, VerificationStatus,
-    classify_document, detect_ocr_anomaly, extract_document,
-    find_lowest_quote, is_valid_business_number, mask_account_number, verify_documents,
+    classify_document, detect_ocr_anomaly, extract_document, extract_main_doc_aux_info, find_auxiliary_contacts,
+    find_lowest_quote, is_valid_business_number, mask_account_number, normalize_name, verify_documents,
 )
 from purchase_verifier.vendor_cache import (
     auto_cache_verified_documents, get_vendor_by_biz_num, save_vendor,
@@ -39,6 +39,9 @@ from purchase_verifier.erp_parser import (
     build_smart_matrix, calculate_business_days, check_nts_business,
     extract_base_info, generate_opinion, get_accurate_total, parse_goods_erp,
     parse_service_erp, save_to_cache, smart_item_matching,
+)
+from purchase_verifier.gemini_extractor import (
+    extract_purchase_documents_with_gemini, get_key_pool,
 )
 
 st.set_page_config(page_title="구매추출기 통합 대시보드", page_icon="💰", layout="wide")
@@ -51,7 +54,7 @@ SESSION_AUTO_CACHED_KEY = "has_auto_cached_current_analysis"
 
 # ---------------------------------------------------------
 # OCR 및 문서 텍스트 추출 엔진
-from purchase_verifier.ocr import ocr_image
+from purchase_verifier.ocr import extract_text_from_pdf_data, ocr_image
 
 
 # ---------------------------------------------------------
@@ -112,40 +115,19 @@ def extract_local_text(uploaded_file) -> str:
 
     # 2. PDF 파일 (.pdf)
     if suffix == ".pdf":
-        page_texts = []
-        pages_needing_ocr = []
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for idx, page in enumerate(pdf.pages):
-                p_text = (page.extract_text() or "").strip()
-                # 폰트 CID 글리프 깨짐 또는 유니코드 외계어 깨짐 감지 시 즉시 로컬 OCR로 전환
-                is_corrupted = p_text.count("(cid:") >= 3 or ("î" in p_text and "ð" in p_text)
-                if len(p_text) >= 30 and not is_corrupted:
-                    page_texts.append((idx, p_text))
-                else:
-                    pages_needing_ocr.append(idx)
-
-        if pages_needing_ocr:
-            # poppler 없이 자체 구동되는 pypdfium2 우선 사용
+        try:
+            return extract_text_from_pdf_data(data)
+        except Exception as e:
             try:
-                import pypdfium2 as pdfium
-                pdf_doc = pdfium.PdfDocument(io.BytesIO(data))
-                for idx in pages_needing_ocr:
-                    pil_img = pdf_doc[idx].render(scale=2).to_pil()
-                    ocr_res = ocr_image_robust(pil_img)
-                    page_texts.append((idx, ocr_res))
+                page_texts = []
+                with pdfplumber.open(io.BytesIO(data)) as pdf:
+                    for page in pdf.pages:
+                        p_text = (page.extract_text() or "").strip()
+                        if p_text:
+                            page_texts.append(p_text)
+                return "\n\n".join(page_texts)
             except Exception:
-                # pdf2image fallback
-                try:
-                    for idx in pages_needing_ocr:
-                        page_imgs = convert_from_bytes(data, first_page=idx + 1, last_page=idx + 1, dpi=300)
-                        ocr_result = "\n".join(ocr_image_robust(img) for img in page_imgs)
-                        page_texts.append((idx, ocr_result))
-                except Exception as e:
-                    for idx in pages_needing_ocr:
-                        page_texts.append((idx, f"[스캔 이미지 감지: 로컬 OCR(Tesseract) 미설치 ({e})]"))
-
-        page_texts.sort(key=lambda x: x[0])
-        return "\n\n".join(text for _, text in page_texts)
+                return f"[PDF 텍스트 추출 실패: {e}]"
 
     # 3. 이미지 파일 (.png, .jpg, .jpeg)
     if suffix in {".png", ".jpg", ".jpeg"}:
@@ -187,6 +169,56 @@ def main() -> None:
     st.title("💰 구매추출기 통합 업무 대시보드")
     st.caption("ERP 구매요청 텍스트와 첨부 서류(PDF/이미지/엑셀)를 원클릭으로 통합 검증하고, 필요한 정보를 손쉽게 복사합니다.")
 
+    def reset_all_data() -> None:
+        """입력 필드, 첨부 파일, 분석 상태, 편집 폼을 모두 기본값으로 완전 초기화"""
+        st.session_state["erp_raw_req"] = ""
+        st.session_state["erp_raw_fin"] = ""
+        st.session_state["erp_raw_itm"] = ""
+        st.session_state["p_req_type"] = "📦 물품"
+        st.session_state["p_con_type"] = "비교견적"
+        st.session_state["uploader_key"] = st.session_state.get("uploader_key", 0) + 1
+
+        keys_to_clear = [
+            SESSION_REQ_KEY,
+            SESSION_DOCS_KEY,
+            SESSION_MANUAL_JSON_KEY,
+            SESSION_AUTO_CACHED_KEY,
+            "in_vendor_name",
+            "in_biz_num",
+            "in_representative",
+            "in_contact_person",
+            "in_phone",
+            "in_email",
+            "in_acc_holder",
+            "in_acc_num",
+        ]
+        for k in keys_to_clear:
+            st.session_state.pop(k, None)
+
+    # 사이드바 엔진 상태 및 다중 키 풀 관리
+    with st.sidebar:
+        st.markdown("### ⚙️ 시스템 엔진 상태")
+        pool = get_key_pool()
+        total_k = pool.total_keys()
+        if total_k > 0:
+            st.success(f"✨ **Gemini 고정밀 AI 활성화**\n\n등록된 API 키: **{total_k}개** (자동 로테이션 적용)")
+        else:
+            st.info("ℹ️ **로컬 OCR 모드 동작 중**")
+
+        with st.expander("🔑 Gemini API 키 관리 (다중 키 지원)", expanded=(total_k == 0)):
+            st.caption("키를 쉼표(,)로 구분해 여러 개 등록하면 분당/일일 한도 초과 시 자동으로 다음 키로 교체되어 끊김 없이 무제한으로 사용 가능합니다.")
+            curr_keys = ",".join(pool.keys)
+            keys_input = st.text_input("Gemini API Keys", value=curr_keys, type="password", key="gemini_keys_sidebar")
+            if st.button("💾 키 저장 및 적용", use_container_width=True):
+                if keys_input.strip():
+                    new_keys = [k.strip() for k in keys_input.split(",") if k.strip()]
+                    pool.keys = new_keys
+                    with open(".env", "a", encoding="utf-8") as f_env:
+                        f_env.write(f"\nGEMINI_API_KEYS={','.join(new_keys)}\n")
+                    st.success("API 키가 성공적으로 저장 및 적용되었습니다!")
+                    time.sleep(1)
+                    st.rerun()
+
     # 1. 구매/계약 기본 정보 선택
     st.markdown("#### 📂 1. 구매/계약 기본 정보 선택")
     c_type1, c_type2 = st.columns(2)
@@ -208,20 +240,22 @@ def main() -> None:
     with col_in2:
         with st.container(border=True):
             st.markdown("#### 📎 3. 로컬 서류 업로드")
-            st.caption("견적서, 비교견적서, 사업자등록증, 통장사본, 공사확인서 (PDF, PNG, JPG, XLSX)")
+            st.caption("견적서, 비교견적서, 사업자등록증, 통장사본, 산출내역서, 기안문, 환율조회증빙 등 (PDF, PNG, JPG, XLSX)")
+            uploader_k = st.session_state.get("uploader_key", 0)
             files = st.file_uploader(
                 "파일 업로드",
                 type=["pdf", "png", "jpg", "jpeg", "xlsx"],
                 accept_multiple_files=True,
                 label_visibility="collapsed",
-                key="uploaded_docs_input",
+                key=f"uploaded_docs_input_{uploader_k}",
             )
             st.info(
-                "**📋 필수 서류 검증 체크리스트**\n\n"
+                "**📋 필수 서류 검증 및 자동 분류 안내**\n\n"
                 "- ✅ **명의 확인:** 모든 견적서의 수신자가 '세종대학교 산학협력단'인지 전수 확인\n"
                 "- ✅ **유효 기간:** 만료일까지 **5영업일(평일) 이상** 잔여 여부 자동 계산\n"
                 "- ✅ **사업자 일치:** 최저가 견적서와 사업자등록증 정보 일치 대조\n"
                 "- ✅ **계좌 검증:** 상호 누락된 대표자 개인명의 단독 통장 사본 자동 반려\n"
+                "- ✅ **부속서류 자동 분리:** 세부산출내역서, 기안문, 환율증빙 등은 견적 비교 왜곡 없이 자동 분리\n"
                 "- ✅ **공사 서류:** '공사' 건일 경우 시설공사/장비설치 확인서 첨부 유무 확인\n"
             )
 
@@ -229,10 +263,7 @@ def main() -> None:
     with col_btn1:
         start_analysis = st.button("🚀 전체 데이터 통합 분석 시작", type="primary", use_container_width=True)
     with col_btn2:
-        if st.button("🔄 전체 초기화", use_container_width=True):
-            for k in ["erp_raw_req", "erp_raw_fin", "erp_raw_itm", SESSION_REQ_KEY, SESSION_DOCS_KEY, SESSION_MANUAL_JSON_KEY, SESSION_AUTO_CACHED_KEY]:
-                st.session_state.pop(k, None)
-            st.rerun()
+        st.button("🔄 전체 초기화", on_click=reset_all_data, use_container_width=True)
 
     # 분석 실행 트리거
     if start_analysis:
@@ -242,14 +273,20 @@ def main() -> None:
 
         documents: list[PurchaseDocument] = []
         if files:
-            with st.spinner("📄 로컬 OCR 엔진으로 서류를 분석 중입니다..."):
-                for uploaded in files:
-                    try:
-                        raw_text = extract_local_text(uploaded)
-                        doc = extract_document(raw_text, uploaded.name)
-                        documents.append(doc)
-                    except Exception as exc:
-                        st.error(f"'{uploaded.name}' 분석 실패: {exc}")
+            pool = get_key_pool()
+            if pool.total_keys() > 0:
+                with st.spinner("✨ Gemini 고정밀 AI로 서류 전체를 자동 분석 중입니다..."):
+                    file_tuples = [(uploaded.name, uploaded.getvalue()) for uploaded in files]
+                    documents = extract_purchase_documents_with_gemini(file_tuples)
+            else:
+                with st.spinner("📄 로컬 OCR 엔진으로 서류를 분석 중입니다..."):
+                    for uploaded in files:
+                        try:
+                            raw_text = extract_local_text(uploaded)
+                            doc = extract_document(raw_text, uploaded.name)
+                            documents.append(doc)
+                        except Exception as exc:
+                            st.error(f"'{uploaded.name}' 분석 실패: {exc}")
 
         st.session_state[SESSION_DOCS_KEY] = documents
         st.session_state[SESSION_REQ_KEY] = True
@@ -339,12 +376,18 @@ def main() -> None:
         # ---------------------------------------------------------
         base_data = extract_base_info(raw_req)
         total_erp_amt = get_accurate_total(raw_req, "합계액")
+        if not total_erp_amt and raw_fin:
+            total_erp_amt = get_accurate_total(raw_fin, "합계액")
 
+        itm_target = raw_itm if raw_itm.strip() else raw_req
         if "물품" in req_type:
-            erp_res = parse_goods_erp(raw_itm)
+            erp_res = parse_goods_erp(itm_target)
         else:
-            erp_res = parse_service_erp(raw_itm, force_category="용역" if "용역" in req_type else "공사, 용역")
+            erp_res = parse_service_erp(itm_target, force_category="용역" if "용역" in req_type else "공사, 용역")
         item_list, is_valid_erp = erp_res[0], erp_res[1]
+
+        if not total_erp_amt and item_list:
+            total_erp_amt = sum(it.get("price", 0) for it in item_list)
 
         if getattr(erp_res, "warnings", None):
             with st.expander(f"⚠️ ERP 품목 파싱 안내 및 주의사항 ({len(erp_res.warnings)}건)", expanded=False):
@@ -524,6 +567,43 @@ def main() -> None:
             st.dataframe(pd.DataFrame(v_rows), use_container_width=True, hide_index=True)
 
         # ---------------------------------------------------------
+        # 📂 첨부된 부속/증빙 서류 (세부산출내역서, 기안문, 환율정보 등 자동 분류)
+        # ---------------------------------------------------------
+        aux_docs = [
+            d for d in documents
+            if d.document_type in (
+                DocumentType.COST_BREAKDOWN,
+                DocumentType.APPROVAL_MEMO,
+                DocumentType.EXCHANGE_RATE_PROOF,
+                DocumentType.SUPPORTING_DOC,
+            )
+        ]
+        if aux_docs:
+            with st.expander(f"📂 첨부된 부속/증빙 서류 ({len(aux_docs)}건 자동 분리됨)", expanded=True):
+                st.caption("견적서가 아닌 부속서류(산출내역서, 기안문, 환율증빙 등)는 견적 비교(최저가 산정 및 업체 대조)에서 자동으로 안전하게 제외되었습니다.")
+                for adoc in aux_docs:
+                    type_badges = {
+                        DocumentType.COST_BREAKDOWN: "📊 세부산출내역서",
+                        DocumentType.APPROVAL_MEMO: "📑 구매 기안문/품의서",
+                        DocumentType.EXCHANGE_RATE_PROOF: "💱 환율정보 증빙",
+                        DocumentType.SUPPORTING_DOC: "📎 기타 부속서류(사유서/규격서)",
+                    }
+                    badge = type_badges.get(adoc.document_type, "📎 부속서류")
+                    c_a1, c_a2 = st.columns([1, 2])
+                    with c_a1:
+                        st.markdown(f"**{badge}**")
+                        st.code(adoc.filename, language=None)
+                    with c_a2:
+                        amt_txt = f"추출 금액: **{adoc.total.value:,}원**" if (adoc.total and adoc.total.value) else "금액 정보 없음"
+                        st.write(f"- 문서 유형: `{adoc.document_type.value}`")
+                        st.write(f"- {amt_txt}")
+                        if adoc.document_type == DocumentType.COST_BREAKDOWN and target_doc and target_doc.total.value:
+                            if adoc.total.value == target_doc.total.value:
+                                st.success("✅ 산출내역서 총액이 기준 견적서 총액과 일치합니다.")
+                            elif target_doc.subtotal.value and adoc.total.value == target_doc.subtotal.value:
+                                st.success("✅ 산출내역서 총액이 기준 견적서 공급가액(VAT별도)과 일치합니다.")
+
+        # ---------------------------------------------------------
         # 📊 스마트 견적 대조표
         # ---------------------------------------------------------
         with st.expander("📊 스마트 견적 대조표 (품목 및 수량·단가 매칭)", expanded=False):
@@ -635,6 +715,8 @@ def main() -> None:
         # ---------------------------------------------------------
         # 📁 업체 정보 추출값 (의견 생성 및 원클릭 보드용)
         # ---------------------------------------------------------
+        # 📁 업체 정보 추출값 (의견 생성 및 원클릭 보드용)
+        # ---------------------------------------------------------
         license_doc = next((d for d in documents if d.document_type == DocumentType.BUSINESS_LICENSE), None)
         cand_ven = (target_doc.vendor_name.raw if target_doc and target_doc.vendor_name.raw else "") or (license_doc.vendor_name.raw if license_doc and license_doc.vendor_name.raw else "")
         def_ven = manual_ai.get("업체명") or cand_ven
@@ -646,6 +728,62 @@ def main() -> None:
         def_contact = manual_ai.get("담당자") or (target_doc.contact_person.raw if target_doc else "")
         def_phn = manual_ai.get("연락처") or (target_doc.phone.raw if target_doc else "")
         def_eml = manual_ai.get("이메일") or (target_doc.email.raw if target_doc else "")
+
+        # 부속서류(제품설명자료, 사유서 등) 내 기재된 보조 연락처 정보 탐색
+        aux_contacts = find_auxiliary_contacts(documents, selected_filename=selected_filename)
+        if aux_contacts:
+            # 견적서에 실무 담당자/연락처가 미기재되어 있거나 유선번호만 있을 경우 부속서류의 010 연락처 우선 연동
+            aux_first = aux_contacts[0]
+            if not def_contact and aux_first.get("contact_person"):
+                def_contact = aux_first["contact_person"]
+            if (not def_phn or not def_phn.startswith("01")) and aux_first.get("phone"):
+                # 부속서류에 010 휴대폰 번호가 있으면 우선 추천
+                for ac in aux_contacts:
+                    if ac.get("phone", "").startswith("01"):
+                        def_phn = ac["phone"]
+                        break
+                if not def_phn.startswith("01") and aux_first.get("phone"):
+                    def_phn = aux_first["phone"]
+            if not def_eml and aux_first.get("email"):
+                def_eml = aux_first["email"]
+
+        # ---------------------------------------------------------
+        # 🏫 [1번 방안] 교내 인물(연구책임자/물품담당자 등) 교차 대조 및 자동 배제
+        # ---------------------------------------------------------
+        campus_names = set()
+        if base_data.get("pi_name"):
+            campus_names.add(base_data["pi_name"].strip())
+        for itm in item_list:
+            c = itm.get("contact", "").strip()
+            if c:
+                c_clean = re.sub(r"[\s\(\)\[\]].*$", "", c).strip()
+                if c_clean:
+                    campus_names.add(c_clean)
+                campus_names.add(c)
+        campus_names.discard("")
+
+        detected_campus_person = ""
+        if def_contact and campus_names:
+            norm_def_contact = normalize_name(def_contact)
+            for cn in campus_names:
+                norm_cn = normalize_name(cn)
+                if norm_cn and (norm_cn == norm_def_contact or norm_cn in norm_def_contact or norm_def_contact in norm_cn):
+                    detected_campus_person = cn
+                    break
+
+        if detected_campus_person:
+            # 견적서의 담당자가 교내 연구책임자/물품담당자로 확인되면 업체 담당자 기본값에서 자동 제외
+            def_contact = ""
+
+        # 연락처(전화번호)가 연구책임자 연락처와 동일한지 교차 대조
+        pi_phone = base_data.get("pi_phone", "")
+        detected_campus_phone = False
+        if pi_phone and def_phn:
+            clean_pi = re.sub(r"\D", "", pi_phone)
+            clean_phn = re.sub(r"\D", "", def_phn)
+            if clean_pi and clean_pi == clean_phn:
+                detected_campus_phone = True
+                def_phn = ""
 
         # ---------------------------------------------------------
         # ✍️ 결재 의견 자동 생성
@@ -669,6 +807,17 @@ def main() -> None:
         st.divider()
         st.markdown("#### 📁 업체 정보 통합 및 ✨ 원클릭 복사 보드")
 
+        if detected_campus_person or detected_campus_phone:
+            warn_items = []
+            if detected_campus_person:
+                warn_items.append(f"담당자명('{detected_campus_person}')")
+            if detected_campus_phone:
+                warn_items.append(f"전화번호('{pi_phone}')")
+            st.warning(
+                f"⚠️ **[교내 인물 감지 안내]** 견적서에 기재된 {', '.join(warn_items)}은(는) "
+                f"ERP 구매요청서의 연구책임자/물품담당자 정보와 일치하여 **업체 담당자란에서 자동 제외**되었습니다."
+            )
+
         c_v1, c_v2, c_v3, c_v4, c_v5, c_v6 = st.columns(6)
         with c_v1: t_ven = st.text_input("업체명", value=def_ven, key="in_vendor_name")
         with c_v2: t_biz = st.text_input("사업자번호", value=def_biz, key="in_biz_num")
@@ -676,6 +825,73 @@ def main() -> None:
         with c_v4: t_contact = st.text_input("담당자명(실무)", value=def_contact, key="in_contact_person")
         with c_v5: t_phn = st.text_input("연락처", value=def_phn, key="in_phone")
         with c_v6: t_eml = st.text_input("이메일", value=def_eml, key="in_email")
+
+        # ---------------------------------------------------------
+        # 📎 [실무 참고] 서류 세부 보조 필드 (본서류 vs 기타서류 구분)
+        # ---------------------------------------------------------
+        main_aux = extract_main_doc_aux_info(target_doc, license_doc, main_phone=t_phn, main_email=t_eml)
+        has_main_aux = bool(
+            main_aux.get("extra_phones") or main_aux.get("tax_email") or
+            main_aux.get("lead_time") or main_aux.get("payment_terms")
+        )
+
+        if has_main_aux or aux_contacts:
+            st.markdown("##### 📎 [실무 참고] 서류 세부 보조 필드 (원클릭 복사)")
+            tab_main, tab_aux = st.tabs([
+                "📄 본서류 추출 세부정보 (견적서/사업자등록증)",
+                "📎 기타서류 추출 세부정보 (제품설명자료/사유서 등)",
+            ])
+
+            with tab_main:
+                if has_main_aux:
+                    # 1. 추가 연락처 (유선/직통)
+                    if main_aux.get("extra_phones"):
+                        c_m1, c_m2 = st.columns([3, 2])
+                        with c_m1:
+                            st.write(f"**📞 추가 전화번호**: {' / '.join(main_aux['extra_phones'])}")
+                            st.caption("견적서/사업자등록증 기재 직통 및 유선 전화번호")
+                        with c_m2:
+                            st.code(" / ".join(main_aux["extra_phones"]), language=None)
+
+                    # 2. 전자세금계산서 전용 이메일
+                    if main_aux.get("tax_email"):
+                        c_m1, c_m2 = st.columns([3, 2])
+                        with c_m1:
+                            st.write(f"**📧 세금계산서 메일**: {main_aux['tax_email']}")
+                            st.caption("전자세금계산서 전용 이메일주소 (ERP 거래처 등록용)")
+                        with c_m2:
+                            st.code(main_aux["tax_email"], language=None)
+
+                    # 3. 납기 및 결제조건 (거창한 복사창 대신 분석 참고용으로 심플하게 표출)
+                    terms_parts = []
+                    if main_aux.get("lead_time"):
+                        terms_parts.append(f"납기: {main_aux['lead_time']}")
+                    if main_aux.get("payment_terms"):
+                        terms_parts.append(f"결제조건: {main_aux['payment_terms']}")
+                    if terms_parts:
+                        st.info(f"🚚 **견적서 특기사항**: {' | '.join(terms_parts)}")
+                else:
+                    st.caption("본 견적서 및 사업자등록증에 추가 기재된 보조 항목이 없습니다.")
+
+            with tab_aux:
+                if aux_contacts:
+                    for ac in aux_contacts:
+                        info_parts = []
+                        if ac.get("contact_person"):
+                            info_parts.append(f"담당: {ac['contact_person']}")
+                        if ac.get("phone"):
+                            info_parts.append(f"연락처: {ac['phone']}")
+                        if ac.get("email"):
+                            info_parts.append(f"이메일: {ac['email']}")
+                        aux_summary = " / ".join(info_parts)
+                        c_ax1, c_ax2 = st.columns([3, 2])
+                        with c_ax1:
+                            st.write(f"📄 **{ac['filename']}** ({ac.get('doc_type', '기타서류')})")
+                            st.caption(aux_summary)
+                        with c_ax2:
+                            st.code(aux_summary, language=None)
+                else:
+                    st.caption("첨부된 기타/부속 서류에서 추출된 연락처 항목이 없습니다.")
 
         st.caption("✨ **원클릭 복사 보드 (우측 📋 아이콘 클릭)**")
         c_cp1, c_cp2, c_cp3, c_cp4 = st.columns([1.2, 1.2, 1.0, 2.2])

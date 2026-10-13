@@ -1,0 +1,201 @@
+[
+  {
+    "filename": "media_1791865224113.pdf",
+    "document_type": "QUOTE",
+    "vendor_name": "유진공조",
+    "representative": "신승현",
+    "biz_number": "267-68-00049",
+    "total_amount": 2966400,
+    "subtotal": 2696727,
+    "vat": 269673,
+    "recipient": "세종대학교 산학협력단",
+    "quote_date": "2026-10-12",
+    "expiry_date": "2026-11-11",
+    "bank_name": "",
+    "account_holder": "",
+    "account_number": "",
+    "contact_person": "",
+    "phone": "010-3127-7619",
+    "email": "",
+    "items": [
+      {
+        "name": "AP110CSPDBCl",
+        "quantity": 1,
+        "unit_price": 1637000,
+        "amount": 1637000
+      },
+      {
+        "name": "기본설치비",
+        "quantity": 1,
+        "unit_price": 330000,
+        "amount": 330000
+      },
+      {
+        "name": "배관추가",
+        "quantity": 12,
+        "unit_price": 35200,
+        "amount": 422400
+      },
+      {
+        "name": "전원선",
+        "quantity": 28,
+        "unit_price": 11000,
+        "amount": 308000
+      },
+      {
+        "name": "가스보충",
+        "quantity": 1,
+        "unit_price": 77000,
+        "amount": 77000
+      },
+      {
+        "name": "배수펌프(중)",
+        "quantity": 1,
+        "unit_price": 132000,
+        "amount": 132000
+      },
+      {
+        "name": "천장작업",
+        "quantity": 1,
+        "unit_price": 60000,
+        "amount": 60000
+      }
+    ]
+  },
+  {
+    "filename": "media_1791865224125.pdf",
+    "document_type": "BUSINESS_LICENSE",
+    "vendor_name": "메인공조",
+    "representative": "김윤",
+    "biz_number": "206-31-43353",
+    "total_amount": null,
+    "subtotal": null,
+    "vat": null,
+    "recipient": "",
+    "quote_date": "2021-02-09",
+    "expiry_date": "",
+    "bank_name": "",
+    "account_holder": "",
+    "account_number": "",
+    "contact_person": "",
+    "phone": "02-435-0011",
+    "email": "ttochi1234@naver.com",
+    "items": []
+  },
+  {
+    "filename": "media_1791865224130.pdf",
+    "document_type": "BANK_COPY",
+    "vendor_name": "메인공조",
+    "representative": "김윤",
+    "biz_number": "",
+    "total_amount": null,
+    "subtotal": null,
+    "vat": null,
+    "recipient": "",
+    "quote_date": "",
+    "expiry_date": "",
+    "bank_name": "KB국민은행",
+    "account_holder": "김윤(메인공조)",
+    "account_number": "933901-01-176638",
+    "contact_person": "",
+    "phone": "",
+    "email": "",
+    "items": []
+  },
+  {
+    "filename": "media_1791865224149.pdf",
+    "document_type": "CONSTRUCTION_CONFIRMATION",
+    "vendor_name": "메인공조",
+    "representative": "",
+    "biz_number": "",
+    "total_amount": 2880000,
+    "subtotal": null,
+    "vat": null,
+    "recipient": "세종대학교 산학협력단장",
+    "quote_date": "2026-10-07",
+    "expiry_date": "",
+    "bank_name": "",
+    "account_holder": "",
+    "account_number": "",
+    "contact_person": "배성현",
+    "phone": "",
+    "email": "",
+    "items": [
+      {
+        "name": "에어컨 본체 및 추가 배관 설치",
+        "quantity": 1,
+        "unit_price": 2880000,
+        "amount": 2880000
+      }
+    ]
+  },
+  {
+    "filename": "media_1791865224175.pdf",
+    "document_type": "QUOTE",
+    "vendor_name": "메인공조",
+    "representative": "김윤",
+    "biz_number": "206-31-43353",
+    "total_amount": 2880000,
+    "subtotal": null,
+    "vat": null,
+    "recipient": "세종대학교 산학협력단",
+    "quote_date": "2026-10-12",
+    "expiry_date": "2026-11-11",
+    "bank_name": "국민은행",
+    "account_holder": "김윤(메인공조)",
+    "account_number": "933901-01-176638",
+    "contact_person": "정순복",
+    "phone": "010-3127-7619",
+    "email": "",
+    "items": [
+      {
+        "name": "AP110CSPDBCl",
+        "quantity": 1,
+        "unit_price": 1580000,
+        "amount": 1580000
+      },
+      {
+        "name": "기본설치비",
+        "quantity": 1,
+        "unit_price": 330000,
+        "amount": 330000
+      },
+      {
+        "name": "추가배관",
+        "quantity": 12,
+        "unit_price": 35200,
+        "amount": 422400
+      },
+      {
+        "name": "가스보충",
+        "quantity": 1,
+        "unit_price": 55000,
+        "amount": 55000
+      },
+      {
+        "name": "천장작업",
+        "quantity": 1,
+        "unit_price": 55000,
+        "amount": 55000
+      },
+      {
+        "name": "배수펌프(중)",
+        "quantity": 1,
+        "unit_price": 132000,
+        "amount": 132000
+      },
+      {
+        "name": "전원선",
+        "quantity": 28,
+        "unit_price": 11000,
+        "amount": 308000
+      },
+      {
+        "name": "절삭",
+        "quantity": -1,
+        "unit_price": 2400,
+        "amount": -2400
+      }
+    ]
+  }
+]

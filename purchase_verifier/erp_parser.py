@@ -149,6 +149,7 @@ def extract_base_info(text: str) -> dict[str, str]:
         "pi_formatted": "",
         "prj_end": "",
         "pi_email": "",
+        "pi_phone": "",
     }
     if not text:
         return info
@@ -186,7 +187,8 @@ def extract_base_info(text: str) -> dict[str, str]:
             info["pi_name"] = parts[0]
             info["pi_dept"] = parts[2] if len(parts) >= 5 else parts[1]
             info["pi_email"] = parts[-1]
-            info["pi_formatted"] = f"{parts[0]} / {format_phone(parts[-2])} / {parts[-1]}"
+            info["pi_phone"] = format_phone(parts[-2])
+            info["pi_formatted"] = f"{parts[0]} / {info['pi_phone']} / {parts[-1]}"
 
             clean_text = text.replace(" ", "")
             pi_name = info["pi_name"]
@@ -226,19 +228,48 @@ def get_accurate_total(text: str, keyword: str = "합계액") -> int:
     if not text:
         return 0
 
-    # 1. 키워드 바로 뒤 인접 패턴 매칭
-    keywords = [keyword] if keyword else ["합계액", "구매요청액", "구매요구액", "총액", "합계"]
+    # 1. 키워드 바로 뒤 동일 행 인접 패턴 매칭 (줄바꿈을 넘지 않음)
+    keywords = [keyword] if keyword else []
+    for default_kw in ["합계액", "구매요청액", "구매요구액", "총액", "합계"]:
+        if default_kw not in keywords:
+            keywords.append(default_kw)
+
     for kw in keywords:
         if not kw or kw not in text:
             continue
-        pattern = rf"{re.escape(kw)}[^\n\d]*?[:：.\t\s]*\s*(?:금\s*)?(?:원\s*)?([0-9]{{1,3}}(?:,[0-9]{{3}})+|[0-9]{{4,}})(?:\s*원)?"
+        pattern = rf"{re.escape(kw)}[^\S\n]*[:：.\t ]*(?:금\s*)?(?:원\s*)?([0-9]{{1,3}}(?:,[0-9]{{3}})+|[0-9]{{4,}})(?:[^\S\n]*원)?"
         m = re.search(pattern, text)
         if m:
             val = safe_int(m.group(1).replace(",", ""))
             if val > 0:
                 return val
 
-    # 2. 키워드 기준 분할 영역 내 탐색 (fallback)
+    # 2. ERP 재원/물품/합계 다중 행 테이블 구조 탐색 (공급가액 + 부가세액 = 합계액)
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    for i, line in enumerate(lines):
+        if any(h in line for h in ["공급가액", "부가세액", "합계액", "공급가", "부가세", "재원"]):
+            # 헤더 직후 1~4행 탐색
+            for next_line in lines[i + 1 : min(i + 5, len(lines))]:
+                raw_nums = re.findall(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?!\d)", next_line)
+                nums = []
+                for n in raw_nums:
+                    v = safe_int(n)
+                    s = str(v)
+                    if len(s) >= 11 or (len(s) == 8 and (s.startswith("19") or s.startswith("20"))):
+                        continue
+                    if v >= 1000 or v == 0:
+                        nums.append(v)
+                if len(nums) >= 3:
+                    for j in range(len(nums) - 2):
+                        a, b, c = nums[j], nums[j + 1], nums[j + 2]
+                        # 공급가액(a) + 부가세액(b) = 합계액(c)
+                        if a > 0 and b >= 0 and abs((a + b) - c) <= 2 and c >= 1000:
+                            return c
+                        # 합계액(a) = 공급가액(b) + 부가세액(c)
+                        if a >= 1000 and b > 0 and c >= 0 and abs(a - (b + c)) <= 2:
+                            return a
+
+    # 3. 키워드 기준 분할 영역 내 탐색 (fallback)
     search_area = text.split(keyword)[-1] if keyword and keyword in text else text
     search_area = re.sub(r"(?<!\d)\d+(?:-\d+)+(?!\d)", "", search_area)
     search_area = re.sub(r"(?<!\d)\d[\d,]*\s*(?:mm|cm|m|kg|g|mg|ml|l|v|hz|w|ea|u|%)(?!\w)", "", search_area, flags=re.IGNORECASE)
@@ -268,6 +299,15 @@ def get_accurate_total(text: str, keyword: str = "합계액") -> int:
                 continue
         if val >= 1000 or val == 0:
             clean_numbers.append(val)
+
+    if len(clean_numbers) >= 3:
+        for j in range(len(clean_numbers) - 2):
+            a, b, c = clean_numbers[j], clean_numbers[j + 1], clean_numbers[j + 2]
+            if a > 0 and b >= 0 and abs((a + b) - c) <= 2 and c >= 1000:
+                return c
+            if a >= 1000 and b > 0 and c >= 0 and abs(a - (b + c)) <= 2:
+                return a
+
     return clean_numbers[0] if clean_numbers else 0
 
 

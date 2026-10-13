@@ -1,0 +1,39 @@
+{
+  "document_type": "QUOTE",
+  "vendor_name": "유진공조",
+  "representative": "신승현",
+  "biz_number": "267-68-00049",
+  "total_amount": 2966400,
+  "recipient": "세종대학교 산학협력단",
+  "quote_date": "2026-10-12",
+  "items": [
+    {
+      "name": "AP110CSPDBС1",
+      "amount": 1637000
+    },
+    {
+      "name": "기본설치비",
+      "amount": 330000
+    },
+    {
+      "name": "배관추가",
+      "amount": 422400
+    },
+    {
+      "name": "전원선",
+      "amount": 308000
+    },
+    {
+      "name": "가스보충",
+      "amount": 77000
+    },
+    {
+      "name": "배수펌프(중)",
+      "amount": 132000
+    },
+    {
+      "name": "천장작업",
+      "amount": 60000
+    }
+  ]
+}

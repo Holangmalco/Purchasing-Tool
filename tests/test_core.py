@@ -960,4 +960,216 @@ def test_bank_copy_corp_account_holder_on_second_line():
     assert bank_doc.account_number.raw == "257-022239-00104"
 
 
+def test_auxiliary_documents_classification():
+    # 1. 세부산출내역서
+    breakdown_text = (
+        "품명: 천장 매립형 양음압기 제작\n"
+        "재료비 노무비 경비 합계\n"
+        "단가 금액 단가 금액\n"
+        "미니PC SET 3 590,000 1,770,000\n"
+        "[ 합 계 ] 16,200,000\n"
+    )
+    doc_bd = extract_document(breakdown_text, "세부산출내역서.pdf")
+    assert doc_bd.document_type == DocumentType.COST_BREAKDOWN
+    assert doc_bd.total.value == 16_200_000
+    assert not any("문서 유형을 확정하지 못했습니다" in w for w in doc_bd.warnings)
+
+    # 2. 구매 기안문/품의서
+    memo_text = (
+        "구매 기안문\n"
+        "문서번호: 2026-0929-01\n"
+        "기안자: 박예찬 (수학통계학과 조교수)\n"
+        "기안일자: 2026-09-29\n"
+        "결재선: 담당 -> 과장 -> 단장\n"
+        "제목: 연구용 장비 구매 품의의 건\n"
+        "1. 관련: 국가연구개발사업 인공지능 모델 연구\n"
+        "2. 위 호와 관련하여 아래와 같이 장비 구매를 품의하오니 재가하여 주시기 바랍니다.\n"
+        "붙임: 견적서 1부, 비교견적서 1부. 끝.\n"
+    )
+    doc_memo = extract_document(memo_text, "구매기안문.pdf")
+    assert doc_memo.document_type == DocumentType.APPROVAL_MEMO
+    assert not any("문서 유형을 확정하지 못했습니다" in w for w in doc_memo.warnings)
+
+    # 3. 요청 당일 환율조회 증빙
+    fx_text = (
+        "외국환율조회\n"
+        "조회일자: 2026-10-12\n"
+        "고시회차: 1회차\n"
+        "서울외국환중개 매매기준율 고시\n"
+        "통화: 미국 달러 (USD)\n"
+        "매매기준율: 1,350.50\n"
+        "송금보내실때: 1,364.00\n"
+        "송금받으실때: 1,337.00\n"
+    )
+    doc_fx = extract_document(fx_text, "20261012_환율조회.pdf")
+    assert doc_fx.document_type == DocumentType.EXCHANGE_RATE_PROOF
+    assert not any("문서 유형을 확정하지 못했습니다" in w for w in doc_fx.warnings)
+
+    # 4. 기타 부속서류 (비교견적불가사유서)
+    support_text = (
+        "비교견적 불가 사유서\n"
+        "과제번호: 2026-0119-01\n"
+        "연구책임자: 박예찬\n"
+        "품명: 천장 매립형 양음압기 제작\n"
+        "사유: 본 장비는 병원 음압 격리병동 전용 특수 사양으로 특허 제작업체 단독 조달 건임.\n"
+    )
+    doc_sup = extract_document(support_text, "수의계약사유서.pdf")
+    assert doc_sup.document_type == DocumentType.SUPPORTING_DOC
+    assert not any("문서 유형을 확정하지 못했습니다" in w for w in doc_sup.warnings)
+
+
+def test_auxiliary_documents_excluded_from_lowest_quote_and_ranking():
+    # 견적서 1: 17,800,000원
+    q1_text = (
+        "見 積 書\n"
+        "세종대학교 산학협력단 귀하\n"
+        "合 計 金 額 : 일금일천칠백팔십만원정(\\17,800,000--)\n"
+        "1. 천정 매립형 양음압기 제작 내역서 참조 식 1 16,200,000\n"
+        "2. 부가가치세 식 1 1,620,000\n"
+        "[합 계] 17,820,000\n"
+        "주식회사 하나지엔씨\n"
+    )
+    doc_q1 = extract_document(q1_text, "견적서_하나지엔씨.pdf")
+
+    # 견적서 2 (비교견적): 19,390,000원
+    q2_text = (
+        "견 적 서\n"
+        "세종대학교 산학협력단 귀중\n"
+        "금 액 : 일금 일천구백삼십구만 원정 (₩ 19,390,000 VAT포함)\n"
+        "1. 천정 매립형 양음압기 1 ₩ 17,635,100\n"
+        "2. 부가가치세(VAT) 식 ₩ 1,763,510\n"
+        "진성이엔비 배동식\n"
+    )
+    doc_q2 = extract_document(q2_text, "비교견적서_진성이엔비.pdf")
+
+    # 세부산출내역서: 16,200,000원 (더 낮은 금액이지만 견적이 아님!)
+    bd_text = (
+        "세부산출내역서\n"
+        "재료비 노무비 경비 합계\n"
+        "미니PC SET 3 590,000 1,770,000\n"
+        "[ 합 계 ] 16,200,000\n"
+    )
+    doc_bd = extract_document(bd_text, "세부산출내역서.pdf")
+
+    # 기안문
+    memo_text = "기안문\n기안자: 박예찬\n결재선: 과장 -> 단장\n제목: 물품구매 기안\n"
+    doc_memo = extract_document(memo_text, "구매기안.pdf")
+
+    # 환율증빙
+    fx_text = "외국환율조회\n서울외국환중개\n매매기준율: 1,350.50\n"
+    doc_fx = extract_document(fx_text, "환율정보.pdf")
+
+    docs = [doc_q1, doc_q2, doc_bd, doc_memo, doc_fx]
+
+    # 최저가 분석: 세부산출내역서(16,200,000)가 최저가로 오염되지 않고, 견적서 1(17,800,000)이 최저가로 선정되어야 함!
+    lowest = find_lowest_quote(docs)
+    assert lowest.candidate_filename == "견적서_하나지엔씨.pdf"
+    assert lowest.amount == 17_800_000
+
+    # 서류 종합 검증 결과
+    checks = verify_documents(docs, "물품")
+    check_names = [c.name for c in checks]
+    assert "세부산출내역서" in check_names
+    assert "구매 기안문/품의서" in check_names
+    assert "환율정보 증빙" in check_names
+    bd_check = next(c for c in checks if c.name == "세부산출내역서")
+    assert bd_check.status == VerificationStatus.PASS
+
+
+def test_form_label_not_recognized_as_contact_person():
+    """견적서의 '참조: 업무 담당자' 아래 '전화번호:' 라벨이 담당자명으로 오인식되지 않아야 함."""
+    text = """
+    견적서
+    상호 : 수인통상
+    등록번호 : 129-38-41931
+    대표 : 이건용
+    참 조 : 업무 담당자
+    전 화 번 호 : 
+    팩 스 번 호 : 
+    Fax/전화 : 031-732-4016 / 010-2319-2737
+    합계금액 : 7,121,050
+    """
+    doc = extract_document(text, "견적서.pdf")
+    # '전화번호'가 담당자로 들어가면 안 됨!
+    assert "전화" not in doc.contact_person.raw
+    # 010 번호가 우선 추출되어야 함
+    assert doc.phone.raw == "010-2319-2737"
+
+
+def test_find_auxiliary_contacts():
+    """부속/기타 서류에서 연락처 정보를 정상 수집해야 함."""
+    from purchase_verifier.core import find_auxiliary_contacts
+    desc_text = """
+    제품설명자료
+    레이더 하우징 2조 제작 건입니다.
+    연락처
+    수인통상 이건용 대표
+    전화번호 010-2319-2737
+    이메일: dragon919@daum.net
+    """
+    doc_q = extract_document("견적서 129-38-41931 합계 1,000,000", "견적서.pdf")
+    doc_d = extract_document(desc_text, "제품설명자료.pdf")
+
+    contacts = find_auxiliary_contacts([doc_q, doc_d], selected_filename="견적서.pdf")
+    assert len(contacts) == 1
+    assert contacts[0]["filename"] == "제품설명자료.pdf"
+    assert contacts[0]["phone"] == "010-2319-2737"
+    assert contacts[0]["email"] == "dragon919@daum.net"
+    assert "이건용" in contacts[0]["contact_person"]
+
+
+def test_extract_main_doc_aux_info():
+    """본 견적서 및 사업자등록증에서 납기, 결제조건, 세금계산서 메일, 팩스 등을 정상 수집해야 함."""
+    from purchase_verifier.core import extract_main_doc_aux_info
+    quote_text = """
+    견적서
+    상호 : 수인통상
+    Fax/전화 : 031-732-4016 / 010-2319-2737
+    합계금액 : 7,121,050
+    특기사항
+    1. 납기 : 발주 후 4주
+    2. 결재조건 : 익월 말
+    입금계좌 : 우리은행 1005-402-846699
+    """
+    lic_text = """
+    사업자등록증
+    상호 : 수인통상
+    전자세금계산서 전용 전자우편주소 : dragonyi@hometax.go.kr
+    """
+    doc_q = extract_document(quote_text, "견적서.pdf")
+    doc_l = extract_document(lic_text, "사업자등록증.pdf")
+
+    info = extract_main_doc_aux_info(doc_q, doc_l, main_phone="010-2319-2737", main_email="dragon919@daum.net")
+    assert info["lead_time"] == "발주 후 4주"
+    assert info["payment_terms"] == "익월 말"
+    assert info["tax_email"] == "dragonyi@hometax.go.kr"
+    assert "031-732-4016" in info["extra_phones"] or info["fax"] == "031-732-4016"
+    assert "1005-402-846699" in info["quote_account"]
+
+
+def test_repair_business_number_ocr():
+    """OCR 오인식 문자(O, l, B 등) 및 체크섬 교정이 사업자등록번호에만 안전하게 적용되어야 함."""
+    from purchase_verifier.core import repair_business_number_ocr, extract_document
+
+    # 1. 영문 OCR 오인식 문자(l->1, O->0) 복원
+    # 107-86-30401 은 유효한 사업자번호
+    assert repair_business_number_ocr("lO7-86-30401") == "107-86-30401"
+    assert repair_business_number_ocr("IO78630401") == "107-86-30401"
+
+    # 2. extract_document 실제 연동 테스트
+    raw_quote = """
+    견적서
+    공급자
+    등록번호 : lO7-86-30401
+    상호 : (주)테스트
+    합계금액 : 1,000,000
+    """
+    doc = extract_document(raw_quote, "견적서.pdf")
+    assert doc.business_number.raw == "107-86-30401"
+
+
+
+
+
+
 

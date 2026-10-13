@@ -40,6 +40,7 @@ def test_extract_base_info_with_prj_end():
     assert info["pi_name"] == "홍길동"
     assert info["pi_dept"] == "컴퓨터공학과"
     assert info["prj_end"] == "2026-10-31"
+    assert info["pi_phone"] == "010-1234-5678"
 
 
 def test_get_accurate_total():
@@ -476,5 +477,57 @@ def test_parse_goods_erp_failed_line_tracking():
     assert len(res.warnings) >= 1
     assert len(res.failed_lines) >= 1
     assert res.failed_lines[0]["reason"] == "앵커 미검출"
+
+
+def test_get_accurate_total_erp_table_distinguishes_supply_and_total():
+    """ERP 요약 테이블에서 공급가액(13,454,545원) 대신 부가세 포함 합계액(14,800,000원)을 정확히 추출하는지 검증."""
+    from purchase_verifier.erp_parser import get_accurate_total
+
+    full_erp_text = """
+    물품(물품) 구매요청서
+    문서번호 : 2026-0119-01-20261009-1
+    구매요구번호*	202610090002 / 물품(물품)
+    대표건명*	딥러닝 연산용 워크스테이션 구매
+    연차연구비	94,173,000
+    총괄연구비	282,519,000
+
+    재원정보
+    1	2026-0119-01	과제명	우수신진연구사업	비수익	1	2026-03-01	2027-02-28	Y	국고	연구시설/장비비(R&D)	시설/장비 설치구입비	14800000	13454545	1345455
+
+    물품내역
+    1	딥러닝 워크스테이션	PC본체		RTX 5080	1	u	14800000	13454545	1345455	14800000	비품	017	영실관	연구실	영306	예	01099788914	딥러닝 워크스테이션
+
+    재원
+    합계	공급가액	부가세액	합계액	물품
+    합계	공급가액	부가세액	합계액	차액	공급가액	부가세액	합계액
+    13,454,545	1,345,455	14,800,000	13,454,545	1,345,455	14,800,000	0	0	0
+    """
+    total = get_accurate_total(full_erp_text, "합계액")
+    assert total == 14_800_000, f"Expected 14,800,000 (합계액), but got {total} (공급가액 오인 여부 확인)"
+
+
+def test_dashboard_reset_button_clears_all_inputs():
+    """초기화 버튼 클릭 시 입력창(텍스트에어리어 3종)과 첨부파일이 완전히 비워지는지 검증."""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("pages/1_1_구매추출기_신규.py").run()
+    # 텍스트 입력
+    at.text_area[0].input("ERP 구매요청서 본문").run()
+    at.text_area[1].input("재원내역").run()
+    at.text_area[2].input("물품내역").run()
+
+    assert at.text_area[0].value == "ERP 구매요청서 본문"
+
+    # 초기화 버튼 클릭
+    reset_btn = next(b for b in at.button if "전체 초기화" in b.label)
+    reset_btn.click().run()
+
+    # 입력창들이 완전히 빈칸으로 비워졌는지 확인
+    assert at.text_area[0].value == ""
+    assert at.text_area[1].value == ""
+    assert at.text_area[2].value == ""
+    assert at.session_state["uploader_key"] >= 1
+
+
 
 
